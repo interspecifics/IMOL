@@ -1,0 +1,37 @@
+fixtures:
+  moving_head_14ch:
+    description: "Generic 14-channel moving head, based on manual photos in docs/lights_reference"
+    default_universe: 0
+    default_address: 1
+    channels:
+      1:
+        name: "color"
+        comment: "See DMX Schedule 2: Colour Disc"
+      2:
+        name: "strobe"
+      3:
+        name: "led_dimmer"
+      4:
+        name: "pattern_disk"
+      5:
+        name: "prism"
+      6:
+        name: "various_colours"
+      7:
+        name: "focus"
+      8:
+        name: "x_axis"
+      9:
+        name: "x_axis_fine"
+      10:
+        name: "y_axis"
+      11:
+        name: "y_axis_fine"
+      12:
+        name: "xy_speed"
+      13:
+        name: "auto_sound"
+      14:
+        name: "reset"
+
+
