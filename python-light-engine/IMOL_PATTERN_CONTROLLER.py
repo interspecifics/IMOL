@@ -26,6 +26,9 @@ from dataclasses import dataclass, field
 from tkinter import ttk
 from typing import Dict, List, Optional
 import random
+import copy
+import json
+import os
 
 import yaml
 from pythonosc.dispatcher import Dispatcher
@@ -38,6 +41,7 @@ FIXTURES_FILE = "fixtures.yml"
 FIXTURE_KEY = "moving_head_14ch"
 FIXTURE_COUNT = 4
 DEFAULT_OSC_PORT = 9000
+PATTERN_SETS_FILE = "pattern_sets.json"
 
 
 def load_fixture_definition(path: str, fixture_key: str) -> dict:
@@ -119,6 +123,18 @@ class PatternSlot:
         return self.dmx_frame is not None
 
 
+@dataclass
+class PatternSet:
+    """
+    A set is a named collection of patterns.
+    This makes it easy to prepare several groups of looks (e.g. "intro",
+    "dense", "quiet") and recall the whole bank in the gallery.
+    """
+
+    name: str
+    patterns: List[PatternSlot]
+
+
 class PatternControllerApp:
     def __init__(self, root: tk.Tk, fixture_def: dict) -> None:
         self.root = root
@@ -153,6 +169,11 @@ class PatternControllerApp:
         # Per-pattern, per-fixture active flags (for GUI checkbuttons).
         self.pattern_active_vars: List[List[tk.BooleanVar]] = []
 
+        # Pattern sets (banks of patterns).
+        self.pattern_sets: List[PatternSet] = []
+        self.set_name_var = tk.StringVar(value="Set 1")
+        self.set_select_var = tk.StringVar()
+
         # GUI state for the per-channel editor.
         self.slider_vars: Dict[int, tk.IntVar] = {}
         self.min_vars: Dict[int, tk.IntVar] = {}
@@ -161,6 +182,9 @@ class PatternControllerApp:
         # OSC server thread handle.
         self._osc_server: Optional[ThreadingOSCUDPServer] = None
         self._osc_thread: Optional[threading.Thread] = None
+
+        # Try to load any previously stored sets from disk before building the UI.
+        self.pattern_sets = self._load_sets_from_disk()
 
         self._build_ui()
 
@@ -233,7 +257,9 @@ class PatternControllerApp:
         self._rebuild_channel_editor()
 
         # Pattern panel.
-        self._build_pattern_panel(right)
+        self.pattern_panel = ttk.Frame(right)
+        self.pattern_panel.pack(fill="both", expand=True)
+        self._build_pattern_panel(self.pattern_panel)
 
     def _rebuild_channel_editor(self) -> None:
         for child in self.channel_frame.winfo_children():
@@ -289,6 +315,10 @@ class PatternControllerApp:
         self.channel_frame.columnconfigure(4, weight=1)
 
     def _build_pattern_panel(self, parent: ttk.Frame) -> None:
+        # Clear previous contents so this can be rebuilt after edits.
+        for child in parent.winfo_children():
+            child.destroy()
+
         ttk.Label(parent, text="Patterns").pack(anchor="w")
 
         self.pattern_active_vars = []
@@ -348,12 +378,51 @@ class PatternControllerApp:
 
             self.pattern_active_vars.append(row_vars)
 
+        # Add-pattern button so the number of patterns is not fixed.
+        ttk.Button(
+            parent,
+            text="Add pattern",
+            command=self.add_pattern,
+        ).pack(anchor="w", pady=(4, 0))
+
         # Global random pattern selector.
         ttk.Button(
             parent,
             text="Random pattern",
             command=self.recall_random_pattern,
         ).pack(anchor="w", pady=(8, 0))
+
+        # Pattern sets (banks).
+        sets_frame = ttk.LabelFrame(parent, text="Pattern sets")
+        sets_frame.pack(fill="x", pady=(8, 0))
+
+        ttk.Label(sets_frame, text="Name").grid(row=0, column=0, sticky="w")
+        ttk.Entry(sets_frame, textvariable=self.set_name_var, width=12).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Button(
+            sets_frame,
+            text="Store set from current",
+            command=self.store_current_set,
+        ).grid(row=0, column=2, padx=(8, 0))
+
+        ttk.Label(sets_frame, text="Load").grid(
+            row=1, column=0, sticky="w", pady=(4, 0)
+        )
+        set_names = [s.name for s in self.pattern_sets]
+        set_combo = ttk.Combobox(
+            sets_frame,
+            textvariable=self.set_select_var,
+            values=set_names,
+            state="readonly",
+            width=12,
+        )
+        set_combo.grid(row=1, column=1, sticky="w", pady=(4, 0))
+        ttk.Button(
+            sets_frame,
+            text="Load set",
+            command=self.load_selected_set,
+        ).grid(row=1, column=2, padx=(8, 0), pady=(4, 0))
 
     # ----------------------------------------------------------------- DMX IO
 
@@ -427,6 +496,109 @@ class PatternControllerApp:
             return
         index = random.choice(defined)
         self.recall_pattern(index)
+
+    def add_pattern(self) -> None:
+        """
+        Append a new empty pattern slot and rebuild the pattern panel.
+        """
+        new_index = len(self.patterns) + 1
+        self.patterns.append(PatternSlot(name=f"Pattern {new_index}"))
+        self._build_pattern_panel(self.pattern_panel)
+
+    # -------------------------------------------------------------- Pattern sets
+
+    def store_current_set(self) -> None:
+        """
+        Store the current list of patterns as a named set.
+        If a set with the same name already exists, it is replaced.
+        """
+        name = self.set_name_var.get().strip() or f"Set {len(self.pattern_sets) + 1}"
+        snapshot = copy.deepcopy(self.patterns)
+
+        for s in self.pattern_sets:
+            if s.name == name:
+                s.patterns = snapshot
+                break
+        else:
+            self.pattern_sets.append(PatternSet(name=name, patterns=snapshot))
+
+        # Persist sets to disk.
+        self._save_sets_to_disk()
+
+        # Refresh the combo box by rebuilding the panel.
+        self.set_select_var.set(name)
+        self._build_pattern_panel(self.pattern_panel)
+
+    def load_selected_set(self) -> None:
+        """
+        Load the patterns from the selected set into the controller.
+        """
+        name = self.set_select_var.get()
+        if not name:
+            return
+        for s in self.pattern_sets:
+            if s.name == name:
+                self.patterns = copy.deepcopy(s.patterns)
+                self._build_pattern_panel(self.pattern_panel)
+                break
+
+    # ---------------------------------------------------------- Persistence
+
+    def _save_sets_to_disk(self) -> None:
+        """
+        Serialize all pattern sets to a JSON file so they survive restarts.
+        """
+        data = {
+            "sets": [
+                {
+                    "name": s.name,
+                    "patterns": [
+                        {
+                            "name": p.name,
+                            "dmx_frame": p.dmx_frame,
+                            "active_fixtures": p.active_fixtures,
+                        }
+                        for p in s.patterns
+                    ],
+                }
+                for s in self.pattern_sets
+            ]
+        }
+        try:
+            with open(PATTERN_SETS_FILE, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except OSError:
+            # In gallery deployment we prefer to keep running even if disk is read-only.
+            pass
+
+    def _load_sets_from_disk(self) -> List[PatternSet]:
+        """
+        Load pattern sets from JSON if available.
+        """
+        if not os.path.exists(PATTERN_SETS_FILE):
+            return []
+        try:
+            with open(PATTERN_SETS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return []
+
+        sets: List[PatternSet] = []
+        for s in data.get("sets", []):
+            patterns: List[PatternSlot] = []
+            for p in s.get("patterns", []):
+                patterns.append(
+                    PatternSlot(
+                        name=p.get("name", "Pattern"),
+                        dmx_frame=p.get("dmx_frame"),
+                        active_fixtures=p.get(
+                            "active_fixtures",
+                            [True for _ in range(FIXTURE_COUNT)],
+                        ),
+                    )
+                )
+            sets.append(PatternSet(name=s.get("name", "Set"), patterns=patterns))
+        return sets
 
     # ------------------------------------------------------------------ OSC
 

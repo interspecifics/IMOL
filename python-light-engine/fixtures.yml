@@ -34,4 +34,34 @@ fixtures:
       14:
         name: "reset"
 
+  varytec_hero_mirror_8ch:
+    description: "Varytec Hero Mirror Moving Head, 8-channel DMX mode (see section 7.8 in the manual)"
+    default_universe: 0
+    default_address: 65
+    channels:
+      1:
+        name: "pan"
+        comment: "0–255 Rotation (pan), 0° up to max value of pan range"
+      2:
+        name: "pan_fine"
+        comment: "0–255 Fine adjustment of rotation (pan)"
+      3:
+        name: "tilt"
+        comment: "0–255 Inclination (tilt), 0° up to max value of tilt area"
+      4:
+        name: "tilt_fine"
+        comment: "0–255 Fine adjustment of inclination (tilt)"
+      5:
+        name: "pan_tilt_speed"
+        comment: "0–255 Speed of rotation (pan) and inclination (tilt), decreasing speed"
+      6:
+        name: "tilt_rotation"
+        comment: "0–7 no function; 8–126 forward (decreasing speed); 127–138 stop; 139–255 backward (increasing speed)"
+      7:
+        name: "auto_show"
+        comment: "0–7 no function; 8–214 pre-programmed shows 1–8; 215–255 sound control pan & tilt"
+      8:
+        name: "control"
+        comment: "0–189 no function; 190–210 reset if held ≥10s; 211–255 no function"
+
 
