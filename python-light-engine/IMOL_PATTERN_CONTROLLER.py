@@ -165,6 +165,52 @@ class PatternSet:
 class PatternControllerApp:
     def __init__(self, root: tk.Tk, moving_head_def: dict) -> None:
         self.root = root
+        # Basic dark theme for the whole controller window.
+        self.root.configure(bg="#111111")
+        style = ttk.Style(self.root)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            # If 'clam' is not available, fall back silently to default.
+            pass
+        style.configure(".", background="#111111", foreground="#e0e0e0")
+        style.configure("TFrame", background="#111111")
+        style.configure("TLabelframe", background="#111111")
+        style.configure("TLabelframe.Label", background="#111111", foreground="#e0e0e0")
+        style.configure("TLabel", background="#111111", foreground="#e0e0e0")
+        style.configure("TButton", background="#333333", foreground="#e0e0e0")
+        style.configure("TCheckbutton", background="#111111", foreground="#e0e0e0")
+        # Inputs: dark field background + dark grey text inside the boxes.
+        style.configure(
+            "TEntry",
+            fieldbackground="#222222",
+            background="#222222",
+            foreground="#d0d0d0",
+            insertcolor="#f0f0f0",
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground="#222222",
+            background="#111111",
+            foreground="#d0d0d0",
+        )
+        # Ensure the readonly/active states also keep the dark style so the
+        # text in the Mode column stays readable on macOS.
+        style.map(
+            "TCombobox",
+            fieldbackground=[
+                ("readonly", "#222222"),
+                ("!disabled", "#222222"),
+            ],
+            foreground=[
+                ("readonly", "#d0d0d0"),
+                ("!disabled", "#d0d0d0"),
+            ],
+            background=[
+                ("readonly", "#111111"),
+                ("!disabled", "#111111"),
+            ],
+        )
         # Fixture definitions for the two types used in this controller.
         self.moving_head_def = moving_head_def
         self.hero_def = load_fixture_definition(FIXTURES_FILE, HERO_FIXTURE_KEY)
@@ -240,7 +286,7 @@ class PatternControllerApp:
     # ------------------------------------------------------------------ GUI
 
     def _build_ui(self) -> None:
-        self.root.title("IMOL Pattern Controller (4 fixtures)")
+        self.root.title("IMOL Pattern Controller_ INTERSPECIFICS")
 
         top = ttk.Frame(self.root)
         top.pack(fill="x", padx=8, pady=4)
