@@ -1,8 +1,11 @@
 import argparse
+import subprocess
+import time
 from typing import List
 
 import yaml
 from ola.ClientWrapper import ClientWrapper
+from ola.OlaClient import OLADNotRunningException
 
 
 class DmxByteArray(bytearray):
@@ -42,6 +45,29 @@ def build_dmx_frame(
     return frame
 
 
+def _start_olad_if_needed() -> None:
+    """
+    Try to start the OLA daemon (olad) if it is not running.
+
+    This is a best-effort helper so that the IMOL apps can be launched
+    directly in the gallery without manually starting OLA via the web UI.
+    """
+    try:
+        # Launch olad in the background. If it is already running this
+        # should be harmless; olad will usually exit or report an error.
+        subprocess.Popen(
+            ["olad"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Give olad a brief moment to start listening.
+        time.sleep(1.0)
+    except OSError:
+        # If olad is not found or cannot be started we just fall back to
+        # the normal error path; the caller will see the OLADNotRunningException.
+        pass
+
+
 def send_single_frame(universe: int, frame: List[int]) -> None:
     """
     Send one DMX frame to the given universe and exit.
@@ -50,7 +76,13 @@ def send_single_frame(universe: int, frame: List[int]) -> None:
     def dmx_sent(state):
         wrapper.Stop()
 
-    wrapper = ClientWrapper()
+    try:
+        wrapper = ClientWrapper()
+    except OLADNotRunningException:
+        # Attempt to start olad automatically and retry once.
+        _start_olad_if_needed()
+        wrapper = ClientWrapper()
+
     client = wrapper.Client()
     client.SendDmx(universe, DmxByteArray(frame), dmx_sent)
     wrapper.Run()

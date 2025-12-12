@@ -17,6 +17,7 @@ venv/
 
 # Logs
 logs/
+python-light-engine/pattern_sets.json
 
 # Misc
 *.swp
