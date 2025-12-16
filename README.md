@@ -22,25 +22,45 @@ For a high-level description of the concept and architecture, see:
   - Local tester for a single fixture definition (`fixtures.yml`).
   - Per-channel faders with editable min/max thresholds.
   - Compact DMX monitor grid for quick visual debugging.
-- `python-light-engine/IMOL_PATTERN_CONTROLLER.py`
-  - Controls **6 fixtures** on one universe:
+- `python-light-engine/IMOL_PATTERN_CONTROLLER_QT.py`
+  - **Main gallery controller** (Qt / PySide6) for the IMOL light engine.
+  - Controls **8 fixtures** on one universe:
     - 4 moving-head spots (`moving_head_14ch`).
     - 2 Varytec Hero mirror fixtures (`varytec_hero_mirror_8ch`).
-  - Each fixture keeps its own configuration and thresholds (Min/Max/Ctl + DMX feedback).
+    - 2 MBM40D mirror-ball motors (`mbm40d_mirror_motor_1ch`).
+  - Fixture setup:
+    - `FIXTURES ADD` panel with `f1..f8` DMX start addresses.
+    - Per-fixture editor with channels laid out from `fixtures.yml`.
   - Per-channel **behaviours**:
-    - Mode: `off`, `static`, `sine`.
-    - Rate: LFO speed in Hz for `sine` mode.
+    - Parameters: Min, Max, Ctl (manual offset), Mode, Rate, DMX (live value).
+    - Modes: `off`, `static`, `sine`, `square`, `saw`.
+    - Rate: floating-point LFO speed in Hz (e.g. `0.050`, `1.250`).
   - Patterns:
-    - Store full fixture behaviours (not only DMX snapshots) **plus** per-lamp on/off state.
-    - Behaviours are animated in real time via a background DMX tick loop.
-  - Patterns can be:
-    - Activated from the GUI.
-    - Selected at random (Random pattern button).
-    - Recalled via OSC:
+    - Slots that store **full FixtureState behaviours** for all fixtures, not just DMX snapshots.
+    - Per-slot on/off mask for Lamps (1–4), Mirrors (5–6) and Motors (7–8).
+    - Background DMX tick loop continuously animates behaviours between Min/Max.
+  - Pattern control:
+    - Activate directly from the GUI (per-slot `Activate`).
+    - `Add pattern` / `Random pattern` buttons, with the pattern list in a scrollable area.
+    - OSC:
       - `/pattern N` → activate pattern N (1-based).
       - `/pattern_random` or `/pattern/random` → activate a random stored pattern.
   - Pattern sets:
-    - Named banks of patterns (e.g. "Intro", "Dense") stored in `pattern_sets.json`.
-    - Can be stored and reloaded for fast gallery deployment.
-
+    - Named banks of patterns stored in `python-light-engine/pattern_sets.json`.
+    - `Store set from current` and `Load set` for fast gallery deployment.
+  - OLA / network integration:
+    - Universe selector (`u:`) and OSC port selector (`osc:`).
+    - `OLA SERVICES` panel: `CHECK`, `OPEN UI`, `STOP`, `RESTART`, `START` (via `brew services`).
+    - Automatic attempt to start `olad` if DMX send fails.
+  - Engine / external control:
+    - Live **DMX FPS** readout.
+    - Toggle to enable/disable external OSC pattern control (from Max or other tools).
+    - `/link/*` OSC hooks for Ableton Link style sync via a bridge:
+      - `/link/enable 0|1`
+      - `/link/tempo <bpm>`
+      - `/link/beat <beat_position>`
+    - `Hard reset (all fixtures off)` button that immediately stops behaviours and sends a black DMX frame.
+  - UI / theme:
+    - Dark, gallery-friendly theme with green accent colour.
+    - Scrollable pattern panel to keep the layout stable even with many patterns.
 

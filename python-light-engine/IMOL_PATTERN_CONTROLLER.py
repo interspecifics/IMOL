@@ -32,6 +32,7 @@ import json
 import os
 import webbrowser
 import math
+import subprocess
 
 import yaml
 from pythonosc.dispatcher import Dispatcher
@@ -45,9 +46,11 @@ from main import build_dmx_frame, send_single_frame
 FIXTURES_FILE = "fixtures.yml"
 FIXTURE_KEY = "moving_head_14ch"
 HERO_FIXTURE_KEY = "varytec_hero_mirror_8ch"
+MIRROR_MOTOR_KEY = "mbm40d_mirror_motor_1ch"
 MOVING_HEAD_COUNT = 4
 HERO_COUNT = 2
-FIXTURE_COUNT = MOVING_HEAD_COUNT + HERO_COUNT
+MIRROR_MOTOR_COUNT = 2
+FIXTURE_COUNT = MOVING_HEAD_COUNT + HERO_COUNT + MIRROR_MOTOR_COUNT
 DEFAULT_OSC_PORT = 9000
 PATTERN_SETS_FILE = "pattern_sets.json"
 
@@ -211,27 +214,37 @@ class PatternControllerApp:
                 ("!disabled", "#111111"),
             ],
         )
-        # Fixture definitions for the two types used in this controller.
+        # Fixture definitions for the types used in this controller.
         self.moving_head_def = moving_head_def
         self.hero_def = load_fixture_definition(FIXTURES_FILE, HERO_FIXTURE_KEY)
+        self.motor_def = load_fixture_definition(FIXTURES_FILE, MIRROR_MOTOR_KEY)
         self.mh_channel_count = len(self.moving_head_def["channels"])
         self.hero_channel_count = len(self.hero_def["channels"])
+        self.motor_channel_count = len(self.motor_def["channels"])
 
         self.universe_var = tk.IntVar(value=self.moving_head_def.get("default_universe", 0))
         self.osc_port_var = tk.IntVar(value=DEFAULT_OSC_PORT)
 
-        # Six fixtures (4 moving heads + 2 hero mirrors), each with its own start address.
+        # Eight fixtures total:
+        # - 4 moving heads
+        # - 2 Hero mirrors
+        # - 2 MBM40D mirror ball motors
         self.fixture_states: List[FixtureState] = []
         for i in range(FIXTURE_COUNT):
             if i < MOVING_HEAD_COUNT:
                 # Moving heads: pack consecutively from their default address.
                 start_addr = self.moving_head_def.get("default_address", 1) + i * self.mh_channel_count
                 ch_count = self.mh_channel_count
-            else:
+            elif i < MOVING_HEAD_COUNT + HERO_COUNT:
                 # Hero mirrors: use their own default address, offset per fixture.
                 hero_index = i - MOVING_HEAD_COUNT
                 start_addr = self.hero_def.get("default_address", 1) + hero_index * self.hero_channel_count
                 ch_count = self.hero_channel_count
+            else:
+                # Mirror ball motors: pack after the mirrors.
+                motor_index = i - (MOVING_HEAD_COUNT + HERO_COUNT)
+                start_addr = self.motor_def.get("default_address", 1) + motor_index * self.motor_channel_count
+                ch_count = self.motor_channel_count
 
             self.fixture_states.append(
                 FixtureState(
@@ -341,11 +354,27 @@ class PatternControllerApp:
             command=self.open_ola_ui,
         ).grid(row=0, column=3, padx=(4, 0))
 
+        ttk.Button(
+            ola_frame,
+            text="Start OLA",
+            command=self.start_ola_service,
+        ).grid(row=0, column=4, padx=(8, 0))
+        ttk.Button(
+            ola_frame,
+            text="Stop OLA",
+            command=self.stop_ola_service,
+        ).grid(row=0, column=5, padx=(4, 0))
+        ttk.Button(
+            ola_frame,
+            text="Restart OLA",
+            command=self.restart_ola_service,
+        ).grid(row=0, column=6, padx=(4, 0))
+
         ttk.Label(
             ola_frame,
             text="Hint: ensure this universe is patched to your Art-Net node in OLA.",
             foreground="#666666",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 0))
+        ).grid(row=1, column=0, columnspan=7, sticky="w", pady=(2, 0))
 
         # Left: fixture/threshold editor; Right: patterns.
         body = ttk.Frame(self.root)
@@ -992,6 +1021,42 @@ class PatternControllerApp:
         except Exception:
             # If opening the browser fails, just update the status label.
             self.ola_status_var.set("Could not open browser. Visit http://localhost:9090 manually.")
+
+    # ------------------------------------------------------ OLA service control
+
+    def _run_ola_service_cmd(self, args: list, action_label: str) -> None:
+        """
+        Helper to run a brew/olad-related command and reflect the result in the
+        status label. This is best-effort; on systems without Homebrew the
+        user will still have to manage OLA manually.
+        """
+        try:
+            result = subprocess.run(
+                args,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            if result.returncode == 0:
+                self.ola_status_var.set(f"{action_label} succeeded.")
+            else:
+                self.ola_status_var.set(
+                    f"{action_label} failed ({result.returncode}): {result.stderr.strip()}"
+                )
+        except FileNotFoundError:
+            self.ola_status_var.set(
+                f"{action_label}: command not found. Use brew or start olad manually."
+            )
+
+    def start_ola_service(self) -> None:
+        # Prefer brew services if available.
+        self._run_ola_service_cmd(["brew", "services", "start", "ola"], "Start OLA")
+
+    def stop_ola_service(self) -> None:
+        self._run_ola_service_cmd(["brew", "services", "stop", "ola"], "Stop OLA")
+
+    def restart_ola_service(self) -> None:
+        self._run_ola_service_cmd(["brew", "services", "restart", "ola"], "Restart OLA")
 
 
 def main() -> None:

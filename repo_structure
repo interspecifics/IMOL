@@ -1,0 +1,33 @@
+an-instrument-made-of-light/
+├─ README.md
+├─ docs/
+│  ├─ concept.md
+│  ├─ tech_rider.md
+│  ├─ installation_layout.pdf
+│  └─ ml_cv_notes.md
+├─ max/
+│  ├─ audio_ml_engine.maxpat          # FluCoMa analysis + ML
+│  ├─ spectral_engine_gui.maxpat      # Spectral config + GUI + quad
+│  ├─ externals/
+│  └─ helpers/
+├─ python-light-engine/
+│  ├─ main.py                         # OSC in + pattern engine + OLA
+│  ├─ patterns.py                     # Autonomous pattern definitions
+│  ├─ fixtures.yml                    # Fixture definitions (4 heads, 2 mirrors, 2 platforms)
+│  ├─ requirements.txt
+│  └─ utils/
+├─ cv-score/
+│  ├─ cv_main.py                      # Camera input + score extraction
+│  ├─ score_mapping.py                # Frame → score parameters
+│  ├─ requirements.txt
+│  └─ tests/
+├─ config/
+│  ├─ dmx_universes.md                # Showtec Net 2/3 + universes map
+│  ├─ osc_addresses.md                # All OSC address conventions
+│  └─ audio_archives_metadata.json
+├─ audio/
+│  ├─ archives/
+│  ├─ processed/
+│  └─ metadata/
+└─ logs/
+   └─ (runtime logs, debugging)
