@@ -26,8 +26,7 @@ audio/
 imol-cv-env/
 python-light-engine/.imol-cv/
 
-# Local Max/MSP scratch dir (note: repo contains a folder with a trailing space)
-max_resynth */
+# Max/MSP (keep in repo)
 
 # Misc
 *.swp
