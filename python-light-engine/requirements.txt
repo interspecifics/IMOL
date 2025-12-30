@@ -2,4 +2,11 @@ ola
 pyyaml
 python-osc
 PySide6
+opencv-python
+opencv-contrib-python
+numpy
+librosa
+soundfile
+matplotlib
+cartopy
 

@@ -19,6 +19,16 @@ venv/
 logs/
 python-light-engine/pattern_sets.json
 
+# Large local data (do not commit)
+audio/
+
+# Local virtualenvs / caches (do not commit)
+imol-cv-env/
+python-light-engine/.imol-cv/
+
+# Local Max/MSP scratch dir (note: repo contains a folder with a trailing space)
+max_resynth */
+
 # Misc
 *.swp
 *.swo

@@ -73,4 +73,13 @@ fixtures:
         name: "rotation"
         comment: "0 no movement; 1–127 CW rotation (speed increasing); 128 stop; 129–255 CCW rotation (speed increasing)"
 
+  af150_fog_1ch:
+    description: "Stairville AF-150 DMX fog machine (Thomann 305148), 1-channel DMX mode"
+    default_universe: 0
+    default_address: 90
+    channels:
+      1:
+        name: "fog_output"
+        comment: "0–127: off; 128–255: fog output on (see AF-150 DMX table in the manual)"
+
 

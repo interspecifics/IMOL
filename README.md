@@ -64,3 +64,36 @@ For a high-level description of the concept and architecture, see:
     - Dark, gallery-friendly theme with green accent colour.
     - Scrollable pattern panel to keep the layout stable even with many patterns.
 
+- `python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py`
+  - Qt-based **computer vision graphic score** tool (PySide6 + OpenCV).
+  - Top row:
+    - Left: CV view (adjustable contrast / brightness / gamma) + detection overlays.
+    - Right: Audio panel (select a folder, loads random file, shows waveform + spectrogram + context text from matching `.rtf` / `.txt`).
+  - Bottom row:
+    - Scrolling **graphic score** that accumulates the light field over time.
+    - Optional **spectrogram-style rendering** (paper texture + energy-based drawing).
+
+### Run the CV Graphic Score
+
+```bash
+python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --camera-index 0
+```
+
+#### Spectrogram-style score rendering (energy + paper texture)
+
+- **Profile mode** (continuous energy bands):
+
+```bash
+python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --score-style spectrogram --score-spectro-render-mode profile
+```
+
+- **Slice mode** (preserves more visible light shapes inside the spectrogram field):
+
+```bash
+python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --score-style spectrogram --score-spectro-render-mode slice --score-spectro-slices-per-frame 3 --score-spectro-slice-step 6
+```
+
+### Repository note: large local media is ignored
+
+The `audio/` folder (archives + processed audio) is **intentionally not tracked** and is ignored by git for repository size/privacy reasons. Use the Audio panel inside `IMOL_CV_GRAPHIC_SCORE_QT.py` to select your local audio folder at runtime.
+

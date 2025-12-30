@@ -63,10 +63,12 @@ FIXTURES_FILE = "fixtures.yml"
 MOVING_HEAD_KEY = "moving_head_14ch"
 HERO_KEY = "varytec_hero_mirror_8ch"
 MBM_KEY = "mbm40d_mirror_motor_1ch"
+FOG_KEY = "af150_fog_1ch"
 MOVING_HEAD_COUNT = 4
 HERO_COUNT = 2
 MBM_COUNT = 2
-FIXTURE_COUNT = MOVING_HEAD_COUNT + HERO_COUNT + MBM_COUNT
+FOG_COUNT = 1
+FIXTURE_COUNT = MOVING_HEAD_COUNT + HERO_COUNT + MBM_COUNT + FOG_COUNT
 DEFAULT_OSC_PORT = 9000
 PATTERN_SETS_FILE = "pattern_sets.json"
 
@@ -190,9 +192,11 @@ class MainWindow(QMainWindow):
         self.moving_head_def = load_fixture(FIXTURES_FILE, MOVING_HEAD_KEY)
         self.hero_def = load_fixture(FIXTURES_FILE, HERO_KEY)
         self.mbm_def = load_fixture(FIXTURES_FILE, MBM_KEY)
+        self.fog_def = load_fixture(FIXTURES_FILE, FOG_KEY)
         self.mh_channel_count = len(self.moving_head_def["channels"])
         self.hero_channel_count = len(self.hero_def["channels"])
         self.mbm_channel_count = len(self.mbm_def["channels"])
+        self.fog_channel_count = len(self.fog_def["channels"])
 
         self.universe = self.moving_head_def.get("default_universe", 0)
         self.osc_port = DEFAULT_OSC_PORT
@@ -214,10 +218,14 @@ class MainWindow(QMainWindow):
                 hero_index = i - MOVING_HEAD_COUNT
                 start = self.hero_def.get("default_address", 1) + hero_index * self.hero_channel_count
                 ch_count = self.hero_channel_count
-            else:
+            elif i < MOVING_HEAD_COUNT + HERO_COUNT + MBM_COUNT:
                 mbm_index = i - MOVING_HEAD_COUNT - HERO_COUNT
                 start = self.mbm_def.get("default_address", 1) + mbm_index * self.mbm_channel_count
                 ch_count = self.mbm_channel_count
+            else:
+                fog_index = i - MOVING_HEAD_COUNT - HERO_COUNT - MBM_COUNT
+                start = self.fog_def.get("default_address", 1) + fog_index * self.fog_channel_count
+                ch_count = self.fog_channel_count
             fs = FixtureState(start_address=start, channel_count=ch_count)
             fs.ensure_defaults()
             self.fixtures.append(fs)
@@ -582,6 +590,21 @@ class MainWindow(QMainWindow):
                     )
                     lamps_row.addWidget(cb)
 
+            if FOG_COUNT > 0:
+                lamps_row.addSpacing(16)
+                lamps_row.addWidget(QLabel("Fog"))
+                for fog_idx in range(FOG_COUNT):
+                    f_idx = MOVING_HEAD_COUNT + HERO_COUNT + MBM_COUNT + fog_idx
+                    cb = QCheckBox(str(f_idx + 1))
+                    if f_idx < len(pattern.active_fixtures):
+                        cb.setChecked(pattern.active_fixtures[f_idx])
+                    cb.stateChanged.connect(
+                        lambda _state, p=i, f=f_idx, cb_ref=cb: self._on_pattern_fixture_toggle(
+                            p, f, cb_ref.isChecked()
+                        )
+                    )
+                    lamps_row.addWidget(cb)
+
             self.pattern_rows.append((name_edit, store_btn, act_btn))
 
         # Add / Random pattern controls.
@@ -669,8 +692,10 @@ class MainWindow(QMainWindow):
             channels = self.moving_head_def["channels"]
         elif fixture_index < MOVING_HEAD_COUNT + HERO_COUNT:
             channels = self.hero_def["channels"]
-        else:
+        elif fixture_index < MOVING_HEAD_COUNT + HERO_COUNT + MBM_COUNT:
             channels = self.mbm_def["channels"]
+        else:
+            channels = self.fog_def["channels"]
 
         headers = ["Ch", "Name", "Min", "Max", "Ctl", "DMX", "Mode", "Rate"]
         for col, text in enumerate(headers):
@@ -693,7 +718,21 @@ class MainWindow(QMainWindow):
             slider = QSlider(Qt.Horizontal)
             slider.setRange(0, 255)
             slider.setValue(fs.slider_values.get(ch, 0))
-            slider.setMaximumWidth(140)
+            slider.setMaximumWidth(120)
+
+            # Precise numeric control for the same value (0–255).
+            ctl_spin = QSpinBox()
+            ctl_spin.setRange(0, 255)
+            ctl_spin.setValue(fs.slider_values.get(ch, 0))
+            ctl_spin.setMaximumWidth(60)
+
+            ctl_widget = QWidget()
+            ctl_layout = QHBoxLayout(ctl_widget)
+            ctl_layout.setContentsMargins(0, 0, 0, 0)
+            ctl_layout.setSpacing(4)
+            ctl_layout.addWidget(slider)
+            ctl_layout.addWidget(ctl_spin)
+
             dmx_label = QLabel("0")
 
             mode_combo = QComboBox()
@@ -708,7 +747,7 @@ class MainWindow(QMainWindow):
 
             self.channels_layout.addWidget(min_spin, row_idx, 2)
             self.channels_layout.addWidget(max_spin, row_idx, 3)
-            self.channels_layout.addWidget(slider, row_idx, 4)
+            self.channels_layout.addWidget(ctl_widget, row_idx, 4)
             self.channels_layout.addWidget(dmx_label, row_idx, 5)
             self.channels_layout.addWidget(mode_combo, row_idx, 6)
             self.channels_layout.addWidget(rate_spin, row_idx, 7)
@@ -717,6 +756,7 @@ class MainWindow(QMainWindow):
                 min_spin,
                 max_spin,
                 slider,
+                ctl_spin,
                 dmx_label,
                 mode_combo,
                 rate_spin,
@@ -729,8 +769,17 @@ class MainWindow(QMainWindow):
             max_spin.valueChanged.connect(
                 lambda val, ch_num=ch: self._on_max_changed(fixture_index, ch_num, val)
             )
-            slider.valueChanged.connect(
-                lambda val, ch_num=ch: self._on_slider_changed(fixture_index, ch_num, val)
+            def _on_slider(val: int, ch_num=ch, f_idx=fixture_index, spin_ref=ctl_spin) -> None:
+                # Keep spinbox in sync and drive behaviour from the slider.
+                spin_ref.setValue(val)
+                self._on_slider_changed(f_idx, ch_num, val)
+
+            slider.valueChanged.connect(_on_slider)
+
+            # When the spinbox changes, update the slider; the slider callback
+            # then updates the model/UI. This avoids double-calling.
+            ctl_spin.valueChanged.connect(
+                lambda val, slider_ref=slider: slider_ref.setValue(val)
             )
             mode_combo.currentTextChanged.connect(
                 lambda text, ch_num=ch: self._on_mode_changed(fixture_index, ch_num, text)
@@ -801,7 +850,12 @@ class MainWindow(QMainWindow):
             widgets = self.channel_widgets.get(ch)
             if not widgets:
                 continue
-            _, _, _, dmx_label, _, _ = widgets
+            _, _, slider, ctl_spin, dmx_label, _, _ = widgets
+            # Keep Ctl widgets in sync with the underlying behaviour value.
+            if slider.value() != fs.slider_values.get(ch, 0):
+                slider.setValue(fs.slider_values.get(ch, 0))
+            if ctl_spin.value() != fs.slider_values.get(ch, 0):
+                ctl_spin.setValue(fs.slider_values.get(ch, 0))
             dmx_label.setText(str(v))
 
     def _send_snapshot(self) -> None:
