@@ -25,6 +25,8 @@ import time
 import threading
 import subprocess
 import webbrowser
+from pathlib import Path
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -33,7 +35,7 @@ from pythonosc.dispatcher import Dispatcher
 from pythonosc.osc_server import ThreadingOSCUDPServer
 from ola.ClientWrapper import ClientWrapper
 from ola.OlaClient import OLADNotRunningException
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -59,7 +61,8 @@ from PySide6.QtWidgets import (
 from main import DmxByteArray, _start_olad_if_needed
 
 
-FIXTURES_FILE = "fixtures.yml"
+BASE_DIR = Path(__file__).resolve().parent
+FIXTURES_FILE = str(BASE_DIR / "fixtures.yml")
 MOVING_HEAD_KEY = "moving_head_14ch"
 HERO_KEY = "varytec_hero_mirror_8ch"
 MBM_KEY = "mbm40d_mirror_motor_1ch"
@@ -70,7 +73,29 @@ MBM_COUNT = 2
 FOG_COUNT = 1
 FIXTURE_COUNT = MOVING_HEAD_COUNT + HERO_COUNT + MBM_COUNT + FOG_COUNT
 DEFAULT_OSC_PORT = 9000
-PATTERN_SETS_FILE = "pattern_sets.json"
+PATTERN_SETS_FILE = str(BASE_DIR / "pattern_sets.json")
+DEFAULT_PATTERN_SLOTS = 7
+
+
+def _coerce_int_key_dict(raw: dict, *, value_type=int) -> dict:
+    """
+    JSON stores dict keys as strings; convert back to int keys.
+    value_type: int or float or str coercion function.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out = {}
+    for k, v in raw.items():
+        try:
+            kk = int(k)
+        except Exception:
+            continue
+        try:
+            out[kk] = value_type(v)
+        except Exception:
+            # Fallback: keep original
+            out[kk] = v
+    return out
 
 
 def load_fixture(path: str, key: str) -> dict:
@@ -168,6 +193,11 @@ class PatternSet:
 
 
 class MainWindow(QMainWindow):
+    # Signals to safely handle OSC events coming from a non-Qt thread
+    osc_pattern_received = Signal(int)  # pattern number (1-based)
+    osc_stop_received = Signal()
+    osc_blackout_received = Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("IMOL Pattern Controller (Qt)")
@@ -232,7 +262,7 @@ class MainWindow(QMainWindow):
 
         # Patterns and sets.
         self.patterns: List[PatternSlot] = [
-            PatternSlot(name=f"Pattern {i+1}") for i in range(4)
+            PatternSlot(name=f"Pattern {i+1}") for i in range(DEFAULT_PATTERN_SLOTS)
         ]
         self.pattern_sets: List[PatternSet] = self._load_sets_from_disk()
         self.active_pattern_index: Optional[int] = None
@@ -242,6 +272,7 @@ class MainWindow(QMainWindow):
         self.patterns_layout: Optional[QVBoxLayout] = None
         self.set_name_edit: Optional[QLineEdit] = None
         self.set_combo: Optional[QComboBox] = None
+        self._last_selected_set_name: str = ""
 
         # OSC server placeholder.
         self._osc_server: Optional[ThreadingOSCUDPServer] = None
@@ -251,7 +282,91 @@ class MainWindow(QMainWindow):
         self._fps_smooth: Optional[float] = None
         self.fps_value_label: Optional[QLabel] = None
 
+        # DMX sender thread (avoid repeated ClientWrapper creation / fd leaks on macOS)
+        self._dmx_thread: Optional[threading.Thread] = None
+        self._dmx_running: bool = True
+        self._dmx_queue: deque = deque(maxlen=1)  # stores (universe:int, frame:List[int])
+        self._dmx_cv = threading.Condition()
+
+        # OSC diagnostics (incoming messages)
+        self.osc_last_label: Optional[QLabel] = None
+        self._osc_rx_count: int = 0
+
         self._build_ui()
+
+        # Wire OSC signals (queued to GUI thread automatically when emitted from OSC thread)
+        self.osc_pattern_received.connect(self._on_osc_pattern_received)
+        self.osc_stop_received.connect(self._on_osc_stop_received)
+        self.osc_blackout_received.connect(self._on_osc_blackout_received)
+
+    def closeEvent(self, event) -> None:
+        """Stop background threads cleanly."""
+        self._dmx_running = False
+        try:
+            with self._dmx_cv:
+                self._dmx_cv.notify_all()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def _ensure_dmx_thread(self) -> None:
+        """Start the DMX sender thread on first use."""
+        if self._dmx_thread is not None:
+            return
+
+        def worker() -> None:
+            wrapper = None
+            client = None
+            while self._dmx_running:
+                with self._dmx_cv:
+                    while self._dmx_running and not self._dmx_queue:
+                        self._dmx_cv.wait(timeout=0.5)
+                    if not self._dmx_running:
+                        break
+                    universe, frame = self._dmx_queue.pop()
+
+                # Ensure OLA client exists (persistent wrapper to keep fd stable)
+                try:
+                    if wrapper is None:
+                        wrapper = ClientWrapper()
+                        client = wrapper.Client()
+                except OLADNotRunningException:
+                    _start_olad_if_needed()
+                    try:
+                        wrapper = ClientWrapper()
+                        client = wrapper.Client()
+                    except Exception as exc:
+                        print(f"[DMX] Failed to connect to OLAD: {exc}")
+                        wrapper = None
+                        client = None
+                        continue
+                except Exception as exc:
+                    print(f"[DMX] OLA init error: {exc}")
+                    wrapper = None
+                    client = None
+                    continue
+
+                if wrapper is None or client is None:
+                    continue
+
+                def dmx_sent(_state) -> None:
+                    try:
+                        wrapper.Stop()
+                    except Exception:
+                        pass
+
+                try:
+                    client.SendDmx(int(universe), DmxByteArray(frame), dmx_sent)
+                    wrapper.Run()
+                except Exception as exc:
+                    # Reset wrapper so we recover on next send
+                    print(f"[DMX] send error: {exc}")
+                    wrapper = None
+                    client = None
+                    continue
+
+        self._dmx_thread = threading.Thread(target=worker, daemon=True)
+        self._dmx_thread.start()
 
         # DMX tick timer.
         self.timer = QTimer(self)
@@ -387,6 +502,9 @@ class MainWindow(QMainWindow):
             layout.addWidget(row_widget, r, c)
 
             self.fixture_addr_edits.append(edit)
+
+        # Validate address ranges once UI is built (helps catch overlaps immediately).
+        QTimer.singleShot(0, self._validate_fixture_address_ranges)
         return group
 
     def _build_engine_block(self) -> QGroupBox:
@@ -402,6 +520,12 @@ class MainWindow(QMainWindow):
         self.fps_value_label = QLabel("—")
         layout.addWidget(self.fps_value_label, 0, 1, Qt.AlignLeft)
 
+        # OSC RX monitor (shows last incoming message)
+        layout.addWidget(QLabel("OSC IN"), 1, 0, Qt.AlignLeft)
+        self.osc_last_label = QLabel("—")
+        self.osc_last_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.osc_last_label, 1, 1, 1, 1, Qt.AlignLeft)
+
         # External OSC enable toggle.
         osc_cb = QCheckBox("Enable OSC pattern control (Max / others)")
         osc_cb.setChecked(True)
@@ -410,19 +534,52 @@ class MainWindow(QMainWindow):
             self.external_osc_enabled = state == Qt.Checked
 
         osc_cb.stateChanged.connect(_on_osc_toggle)
-        layout.addWidget(osc_cb, 1, 0, 1, 2, Qt.AlignLeft)
+        layout.addWidget(osc_cb, 2, 0, 1, 2, Qt.AlignLeft)
 
         # Hard reset: immediately stop all behaviours and send DMX = 0.
         reset_btn = QPushButton("Hard reset (all fixtures off)")
         reset_btn.clicked.connect(self._on_hard_reset_all)
-        layout.addWidget(reset_btn, 2, 0, 1, 2, Qt.AlignLeft)
+        layout.addWidget(reset_btn, 3, 0, 1, 2, Qt.AlignLeft)
 
         # Placeholder for Ableton Link (not implemented yet, but reserved).
         link_label = QLabel("Ableton Link: driven via /link/* OSC")
         link_label.setEnabled(False)
-        layout.addWidget(link_label, 3, 0, 1, 2, Qt.AlignLeft)
+        layout.addWidget(link_label, 4, 0, 1, 2, Qt.AlignLeft)
 
         return group
+
+    def _osc_note_incoming(self, msg: str) -> None:
+        """Update OSC RX monitor in the UI."""
+        self._osc_rx_count += 1
+        if self.osc_last_label is not None:
+            self.osc_last_label.setText(f"{self._osc_rx_count}: {msg}")
+
+    def _on_osc_pattern_received(self, n: int) -> None:
+        """Handle /pattern N on the GUI thread (N is 1-based)."""
+        n = int(n)
+        self._osc_note_incoming(f"/pattern {n}")
+        idx = n - 1
+        if idx < 0:
+            return
+        if idx >= len(self.patterns):
+            self._set_status(f"OSC: /pattern {n} ignored (out of range).")
+            return
+        if not self.patterns[idx].is_defined():
+            self._set_status(f"OSC: /pattern {n} ignored (slot undefined).")
+            return
+        self._on_activate_pattern(idx)
+
+    def _on_osc_stop_received(self) -> None:
+        """Handle /pattern 0 on the GUI thread."""
+        self.active_pattern_index = None
+        self._osc_note_incoming("/pattern 0 (stop)")
+        self._set_status("OSC: pattern stopped (/pattern 0).")
+
+    def _on_osc_blackout_received(self) -> None:
+        """Handle /blackout on the GUI thread."""
+        self._osc_note_incoming("/blackout")
+        self._on_hard_reset_all()
+        self._set_status("OSC: blackout (/blackout).")
 
     def _on_hard_reset_all(self) -> None:
         """
@@ -623,7 +780,8 @@ class MainWindow(QMainWindow):
         self.patterns_layout.addWidget(sets_group)
         sets_layout = QGridLayout(sets_group)
 
-        self.set_name_edit = QLineEdit("Set 1")
+        default_name = self._last_selected_set_name or "Set 1"
+        self.set_name_edit = QLineEdit(default_name)
         sets_layout.addWidget(QLabel("Name"), 0, 0)
         sets_layout.addWidget(self.set_name_edit, 0, 1)
         store_set_btn = QPushButton("Store set from current")
@@ -633,6 +791,8 @@ class MainWindow(QMainWindow):
         sets_layout.addWidget(QLabel("Load"), 1, 0)
         self.set_combo = QComboBox()
         self._refresh_set_combo()
+        if self._last_selected_set_name:
+            self.set_combo.setCurrentText(self._last_selected_set_name)
         sets_layout.addWidget(self.set_combo, 1, 1)
         load_set_btn = QPushButton("Load set")
         load_set_btn.clicked.connect(self._on_load_set)
@@ -655,6 +815,7 @@ class MainWindow(QMainWindow):
         dispatcher.map("/pattern", self._osc_pattern_handler)
         dispatcher.map("/pattern_random", self._osc_random_handler)
         dispatcher.map("/pattern/random", self._osc_random_handler)
+        dispatcher.map("/blackout", self._osc_blackout_handler)
         dispatcher.map("/link/enable", self._osc_link_enable)
         dispatcher.map("/link/tempo", self._osc_link_tempo)
         dispatcher.map("/link/beat", self._osc_link_beat)
@@ -677,8 +838,64 @@ class MainWindow(QMainWindow):
     def _make_fixture_addr_callback(self, index: int):
         def _cb(value: int) -> None:
             self.fixtures[index].start_address = value
+            self._validate_fixture_address_ranges()
 
         return _cb
+
+    def _validate_fixture_address_ranges(self) -> None:
+        """
+        Validate DMX address ranges for all fixtures:
+        - Detect overlaps (fog overwriting other fixtures, etc.)
+        - Detect out-of-range spans beyond 512
+        Highlights offending address spinboxes and updates the status label.
+        """
+        ranges = []
+        for i, fs in enumerate(self.fixtures):
+            start = int(fs.start_address)
+            end = int(fs.start_address) + int(fs.channel_count) - 1
+            ranges.append((i, start, end))
+
+        bad_indices: set[int] = set()
+        messages: list[str] = []
+
+        # Out-of-range check
+        for i, start, end in ranges:
+            if start < 1 or start > 512:
+                bad_indices.add(i)
+                messages.append(f"f{i+1} start {start} is out of range (1..512)")
+            if end > 512:
+                bad_indices.add(i)
+                messages.append(f"f{i+1} span {start}-{end} exceeds 512")
+
+        # Overlap check (pairwise)
+        for a in range(len(ranges)):
+            i1, s1, e1 = ranges[a]
+            for b in range(a + 1, len(ranges)):
+                i2, s2, e2 = ranges[b]
+                if s1 <= e2 and s2 <= e1:
+                    bad_indices.add(i1)
+                    bad_indices.add(i2)
+                    ov_s = max(s1, s2)
+                    ov_e = min(e1, e2)
+                    messages.append(f"Overlap f{i1+1}({s1}-{e1}) with f{i2+1}({s2}-{e2}) at {ov_s}-{ov_e}")
+
+        # Highlight UI widgets
+        if hasattr(self, "fixture_addr_edits"):
+            for i, edit in enumerate(self.fixture_addr_edits):
+                if i in bad_indices:
+                    edit.setStyleSheet("QSpinBox { border: 2px solid #ff3b30; }")
+                else:
+                    edit.setStyleSheet("")
+
+        if messages:
+            # Keep message short but informative.
+            self._set_status("DMX address warning: " + " | ".join(messages[:2]))
+        else:
+            # Only reset to a benign status if we are not currently showing an error.
+            # Avoid spamming status while user is working.
+            current = self.ola_status_label.text()
+            if "DMX address warning" in current:
+                self._set_status("OK")
 
     def _rebuild_channel_controls(self, fixture_index: int) -> None:
         # Clear layout.
@@ -941,9 +1158,12 @@ class MainWindow(QMainWindow):
         pattern = self.patterns[idx]
         if not pattern.is_defined():
             return
+        # Keep a reference to current fixtures so we can pad/truncate if the stored pattern
+        # was created with a different FIXTURE_COUNT (e.g. before adding fog).
+        prev_fixtures = self.fixtures
         # Restore fixture behaviours from this pattern.
         if pattern.fixtures_state:
-            self.fixtures = [
+            restored = [
                 FixtureState(
                     start_address=fs.start_address,
                     channel_count=fs.channel_count,
@@ -956,7 +1176,29 @@ class MainWindow(QMainWindow):
                 )
                 for fs in pattern.fixtures_state
             ]
+            # Pad/truncate to current FIXTURE_COUNT to avoid index mismatches elsewhere in the UI.
+            if len(restored) < FIXTURE_COUNT:
+                tail = prev_fixtures[len(restored):]
+                restored.extend(
+                    FixtureState(
+                        start_address=fs.start_address,
+                        channel_count=fs.channel_count,
+                        min_values=dict(fs.min_values),
+                        max_values=dict(fs.max_values),
+                        slider_values=dict(fs.slider_values),
+                        modes=dict(fs.modes),
+                        rates=dict(fs.rates),
+                        phases=dict(fs.phases),
+                    )
+                    for fs in tail
+                )
+            elif len(restored) > FIXTURE_COUNT:
+                restored = restored[:FIXTURE_COUNT]
+            self.fixtures = restored
         self.active_pattern_index = idx
+        self._set_status(f"Activated pattern {idx+1}: {pattern.name}")
+        # Send immediately for responsiveness (tick will continue streaming)
+        self._send_snapshot()
 
     def _on_pattern_fixture_toggle(self, p_idx: int, f_idx: int, active: bool) -> None:
         self.patterns[p_idx].active_fixtures[f_idx] = active
@@ -973,15 +1215,34 @@ class MainWindow(QMainWindow):
             idx = int(args[0]) - 1
         except (TypeError, ValueError):
             return
+        if idx < 0:
+            print("[OSC IN] /pattern 0 -> stop")
+            self.osc_stop_received.emit()
+            return
         if 0 <= idx < len(self.patterns):
-            # Schedule on GUI thread.
-            QTimer.singleShot(0, lambda i=idx: self._on_activate_pattern(i))
+            n = idx + 1
+            print(f"[OSC IN] /pattern {n}")
+            self.osc_pattern_received.emit(n)
+            return
+
+        # Out of range
+        n = idx + 1
+        print(f"[OSC IN] /pattern {n} (out of range)")
+        # UI update must be on GUI thread; reuse signal path by emitting then range-checking there.
+        self.osc_pattern_received.emit(n)
 
     def _osc_random_handler(self, _addr: str, *_args) -> None:
         """Handle /pattern_random or /pattern/random messages."""
         if not self.external_osc_enabled:
             return
         QTimer.singleShot(0, self._on_random_pattern)
+
+    def _osc_blackout_handler(self, _addr: str, *_args) -> None:
+        """Handle /blackout messages from OSC (hard reset: all fixtures off)."""
+        if not self.external_osc_enabled:
+            return
+        print("[OSC IN] /blackout")
+        self.osc_blackout_received.emit()
 
     # Link-style tempo / beat sync over OSC -------------------------------
 
@@ -1106,37 +1367,26 @@ class MainWindow(QMainWindow):
         updates the OLA status label so the user sees when we restart the
         connection to olad.
         """
-        try:
-            wrapper = ClientWrapper()
-        except OLADNotRunningException:
-            self._set_status("OLAD not running; attempting to start it…")
-            _start_olad_if_needed()
-            try:
-                wrapper = ClientWrapper()
-            except OLADNotRunningException:
-                self._set_status("Failed to connect to OLAD after restart attempt.")
-                return
-
-        client = wrapper.Client()
-
-        def dmx_sent(_state) -> None:
-            wrapper.Stop()
-
-        try:
-            client.SendDmx(self.universe, DmxByteArray(frame), dmx_sent)
-            wrapper.Run()
-            self._set_status(f"Sending DMX to Universe {self.universe}.")
-        except Exception as exc:
-            self._set_status(f"DMX send error: {exc}")
+        # Queue latest frame for background DMX thread (non-blocking UI)
+        self._ensure_dmx_thread()
+        with self._dmx_cv:
+            self._dmx_queue.append((int(self.universe), list(frame)))
+            self._dmx_cv.notify()
+        self._set_status(f"Sending DMX to Universe {self.universe}.")
 
     # --------------------------- Pattern sets persistence --------------------
 
     def _refresh_set_combo(self) -> None:
         if self.set_combo is None:
             return
+        prev = self.set_combo.currentText()
         self.set_combo.clear()
         for s in self.pattern_sets:
             self.set_combo.addItem(s.name)
+        # Restore selection if possible
+        target = self._last_selected_set_name or prev
+        if target:
+            self.set_combo.setCurrentText(target)
 
     def _on_store_set(self) -> None:
         """Store the current patterns into a named set and save to disk."""
@@ -1153,6 +1403,7 @@ class MainWindow(QMainWindow):
         self._save_sets_to_disk()
         if self.set_name_edit:
             self.set_name_edit.setText(name)
+        self._last_selected_set_name = name
         self._refresh_set_combo()
 
     def _on_load_set(self) -> None:
@@ -1160,6 +1411,7 @@ class MainWindow(QMainWindow):
         if not self.set_combo or self.set_combo.currentIndex() < 0:
             return
         name = self.set_combo.currentText()
+        self._last_selected_set_name = name
         for s in self.pattern_sets:
             if s.name == name:
                 # Deep copy so further edits do not mutate the stored set.
@@ -1178,12 +1430,12 @@ class MainWindow(QMainWindow):
                             [FixtureState(**{
                                 "start_address": fs.start_address,
                                 "channel_count": fs.channel_count,
-                                "min_values": dict(fs.min_values),
-                                "max_values": dict(fs.max_values),
-                                "slider_values": dict(fs.slider_values),
-                                "modes": dict(fs.modes),
-                                "rates": dict(fs.rates),
-                                "phases": dict(fs.phases),
+                                "min_values": _coerce_int_key_dict(fs.min_values, value_type=int),
+                                "max_values": _coerce_int_key_dict(fs.max_values, value_type=int),
+                                "slider_values": _coerce_int_key_dict(fs.slider_values, value_type=int),
+                                "modes": _coerce_int_key_dict(fs.modes, value_type=str),
+                                "rates": _coerce_int_key_dict(fs.rates, value_type=float),
+                                "phases": _coerce_int_key_dict(fs.phases, value_type=float),
                             }) for fs in (p.fixtures_state or [])]
                             if p.fixtures_state
                             else None
@@ -1192,8 +1444,24 @@ class MainWindow(QMainWindow):
                     )
                     for p in s.patterns
                 ]
+
+                # Pad/truncate to default slot count so OSC /pattern 1..7 stays valid.
+                if len(self.patterns) < DEFAULT_PATTERN_SLOTS:
+                    for i in range(len(self.patterns), DEFAULT_PATTERN_SLOTS):
+                        self.patterns.append(PatternSlot(name=f"Pattern {i+1}"))
+                elif len(self.patterns) > DEFAULT_PATTERN_SLOTS:
+                    self.patterns = self.patterns[:DEFAULT_PATTERN_SLOTS]
+
                 self._rebuild_patterns_ui()
+                # Keep UI selection consistent after rebuild
+                if self.set_name_edit:
+                    self.set_name_edit.setText(name)
+                if self.set_combo:
+                    self.set_combo.setCurrentText(name)
+                self._set_status(f"Loaded set: {name}")
                 break
+        else:
+            self._set_status(f"Load set failed: '{name}' not found.")
 
     def _save_sets_to_disk(self) -> None:
         data = {

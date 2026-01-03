@@ -27,7 +27,7 @@ import argparse
 import cv2
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QImage, QPixmap, QPalette, QColor
+from PySide6.QtGui import QImage, QPixmap, QPalette, QColor, QFont, QPainter, QPen, QFontMetrics
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -40,6 +40,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QSlider,
     QGroupBox,
+    QCheckBox,
 )
 
 # Import our advanced geometry analyzer
@@ -54,16 +55,204 @@ except ImportError:
     LIBROSA_AVAILABLE = False
     print("Warning: librosa not available. Install with: pip install librosa")
 
+# OSC (pattern controller)
+try:
+    from pythonosc.udp_client import SimpleUDPClient
+    OSC_AVAILABLE = True
+except ImportError:
+    OSC_AVAILABLE = False
+    SimpleUDPClient = None
+    print("Warning: python-osc not available. Install with: pip install python-osc")
+
+
+def _norm01(x: np.ndarray) -> np.ndarray:
+    x = np.asarray(x, dtype=np.float32)
+    mn = float(np.min(x)) if x.size else 0.0
+    mx = float(np.max(x)) if x.size else 1.0
+    if mx - mn < 1e-9:
+        return np.zeros_like(x, dtype=np.float32)
+    return (x - mn) / (mx - mn)
+
+
+def _ellipsize_cv_text(text: str, max_px: int, font_face: int, font_scale: float, thickness: int) -> str:
+    """Ellipsize text to fit in max_px using cv2.getTextSize."""
+    if max_px <= 0:
+        return ""
+    (w, _), _ = cv2.getTextSize(text, font_face, font_scale, thickness)
+    if w <= max_px:
+        return text
+    ell = "…"
+    lo, hi = 0, len(text)
+    best = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = text[:mid].rstrip() + ell
+        (cw, _), _ = cv2.getTextSize(candidate, font_face, font_scale, thickness)
+        if cw <= max_px:
+            best = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return best if best else ell
+
+
+def _qt_color_from_bgr(bgr: tuple[int, int, int]) -> QColor:
+    b, g, r = bgr
+    return QColor(int(r), int(g), int(b))
+
+
+def _sanitize_context(text: str) -> str:
+    """
+    Make RTF/TXT context safe + readable in a single-line terminal UI:
+    - keep ASCII printable
+    - collapse whitespace
+    - collapse noisy punctuation runs
+    """
+    s = re.sub(r"[^\x20-\x7E]+", " ", text)
+    s = re.sub(r"[;]{2,}", ";", s)
+    s = re.sub(r"[|]{2,}", "|", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    # Drop common font-table remnants if any slip through
+    s = re.sub(r"^\s*Times-Roman\s*[,;:\s\\\*\"]+", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"\bTimes-Roman\b", "", s, flags=re.IGNORECASE)
+    # If the beginning still looks like an RTF font header, strip the first token chunk.
+    s = re.sub(r"^\s*[A-Za-z0-9\-]+\s*[,;:\s\\\*\"]{2,}", "", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _wrap_text_to_lines(text: str, metrics: QFontMetrics, max_width_px: int) -> list[str]:
+    """
+    Word-wrap `text` into lines that fit `max_width_px` using Qt font metrics.
+    """
+    if max_width_px <= 0:
+        return []
+    words = text.split(" ")
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        if not w:
+            continue
+        candidate = f"{cur} {w}".strip() if cur else w
+        if metrics.horizontalAdvance(candidate) <= max_width_px:
+            cur = candidate
+            continue
+        if cur:
+            lines.append(cur)
+        # If a single word is too long, hard-cut it with ellipsis.
+        if metrics.horizontalAdvance(w) > max_width_px:
+            cut = w
+            ell = "…"
+            while cut and metrics.horizontalAdvance(cut + ell) > max_width_px:
+                cut = cut[:-1]
+            lines.append((cut + ell) if cut else ell)
+            cur = ""
+        else:
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
+class AudioFeatureTimeline:
+    """
+    Extracted audio features as time series, used for visualization and for OSC scheduling.
+    All arrays are 1D and share the same timebase `t` (seconds).
+    """
+
+    def __init__(self):
+        self.t: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self.rms: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self.onset: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self.centroid: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self.bandwidth: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self.flatness: np.ndarray = np.zeros((0,), dtype=np.float32)
+        self.rolloff: np.ndarray = np.zeros((0,), dtype=np.float32)
+        # ML state (cluster -> pattern id)
+        self.cluster_labels: np.ndarray = np.zeros((0,), dtype=np.int16)  # 0..k-1 per frame
+        self.cluster_to_pattern: dict[int, int] = {}  # cluster_id -> 1..pattern_count
+        self.pattern_count: int = 7
+        self.duration: float = 0.0
+
+    @property
+    def is_valid(self) -> bool:
+        return self.t.size > 1
+
+    def value_at(self, arr: np.ndarray, t_sec: float) -> float:
+        if arr.size == 0 or self.t.size == 0:
+            return 0.0
+        idx = int(np.clip(np.searchsorted(self.t, t_sec, side="right") - 1, 0, arr.size - 1))
+        return float(arr[idx])
+
+    def label_at(self, t_sec: float) -> int:
+        """Return mapped pattern number (1..pattern_count) at time t_sec."""
+        if self.cluster_labels.size == 0 or self.t.size == 0:
+            return 1
+        idx = int(np.clip(np.searchsorted(self.t, t_sec, side="right") - 1, 0, self.cluster_labels.size - 1))
+        cid = int(self.cluster_labels[idx])
+        return int(self.cluster_to_pattern.get(cid, 1))
+
+
+def _kmeans_fit_predict(X: np.ndarray, k: int, seed: int = 0, iters: int = 25) -> np.ndarray:
+    """
+    Minimal k-means (numpy) for small feature matrices.
+    Returns labels in 0..k-1.
+    """
+    X = np.asarray(X, dtype=np.float32)
+    n = X.shape[0]
+    if n == 0:
+        return np.zeros((0,), dtype=np.int16)
+    k = int(max(1, min(k, n)))
+
+    rng = np.random.default_rng(int(seed))
+    idxs = rng.choice(n, size=k, replace=False)
+    C = X[idxs].copy()
+
+    labels = np.zeros((n,), dtype=np.int16)
+    for _ in range(iters):
+        # squared distances: (n,k)
+        d2 = ((X[:, None, :] - C[None, :, :]) ** 2).sum(axis=2)
+        new_labels = d2.argmin(axis=1).astype(np.int16)
+        if np.array_equal(new_labels, labels):
+            break
+        labels = new_labels
+        # update centroids
+        for j in range(k):
+            mask = labels == j
+            if not np.any(mask):
+                # re-seed empty cluster
+                C[j] = X[rng.integers(0, n)]
+            else:
+                C[j] = X[mask].mean(axis=0)
+    return labels
+
 
 def strip_rtf(text: str) -> str:
     """Strip RTF formatting to get plain text."""
-    # Remove RTF control words and groups
-    text = re.sub(r'\\[a-z]+\d*\s?', '', text)
-    # Remove curly braces
-    text = re.sub(r'[{}]', '', text)
-    # Clean up multiple spaces
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
+    if not text:
+        return ""
+
+    # Remove header groups that often contain font names / metadata
+    text = re.sub(r"\{\\fonttbl[\s\S]*?\}", " ", text)
+    text = re.sub(r"\{\\colortbl[\s\S]*?\}", " ", text)
+    text = re.sub(r"\{\\stylesheet[\s\S]*?\}", " ", text)
+    text = re.sub(r"\{\\\*[\s\S]*?\}", " ", text)
+
+    # Paragraph-ish controls to spaces
+    text = re.sub(r"\\par[d]?\b", " ", text)
+    text = re.sub(r"\\line\b", " ", text)
+    text = re.sub(r"\\tab\b", " ", text)
+
+    # Remove hex escapes
+    text = re.sub(r"\\'[0-9a-fA-F]{2}", " ", text)
+
+    # Remove remaining control words like \fs24, \b0, \cf1
+    text = re.sub(r"\\[a-zA-Z]+\d*(?:-[0-9]+)?\s?", " ", text)
+
+    # Remove braces and normalize whitespace
+    text = re.sub(r"[{}]", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 class AudioViewerWidget(QWidget):
@@ -87,29 +276,62 @@ class AudioViewerWidget(QWidget):
         self.display_label.setStyleSheet("background-color: black; border: 1px solid #333;")
         layout.addWidget(self.display_label)
         
-        # Load button with modern styling
+        # Load button (integrated into transport row to keep more vertical space for the spectrogram)
         self.load_button = QPushButton("Select Audio Folder")
-        self.load_button.setFixedHeight(38)
+        self.load_button.setFixedHeight(28)
+        self.load_button.setMinimumWidth(180)
+        # Minimal, terminal-like look (consistent with the rest of the UI)
         self.load_button.setStyleSheet("""
             QPushButton {
-                background-color: #2a2a2a;
-                color: #e0e0e0;
-                border: 1px solid #555;
-                padding: 8px;
-                font-family: 'SF Pro Display', 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
-                font-size: 13px;
-                font-weight: 500;
-                letter-spacing: 0.3px;
+                background-color: #151515;
+                color: #cfcfcf;
+                border: 1px solid #333;
+                padding: 4px 10px;
+                font-size: 12px;
             }
-            QPushButton:hover {
-                background-color: #3a3a3a;
-                border-color: #666;
-            }
-            QPushButton:pressed {
-                background-color: #1a1a1a;
-            }
+            QPushButton:hover { background-color: #1d1d1d; border-color: #444; }
+            QPushButton:pressed { background-color: #0f0f0f; }
         """)
-        layout.addWidget(self.load_button)
+
+        # Transport row (playback of extracted features; does NOT play audio)
+        transport = QHBoxLayout()
+        transport.setContentsMargins(8, 0, 8, 0)
+        transport.setSpacing(10)
+
+        self.play_button = QPushButton("Play")
+        self.play_button.setFixedHeight(28)
+        self.play_button.setStyleSheet("""
+            QPushButton {
+                background-color: #151515;
+                color: #cfcfcf;
+                border: 1px solid #333;
+                padding: 4px 10px;
+                font-size: 12px;
+            }
+            QPushButton:hover { background-color: #1d1d1d; border-color: #444; }
+            QPushButton:pressed { background-color: #0f0f0f; }
+        """)
+
+        self.autoplay_cb = QCheckBox("Auto play features")
+        self.autoplay_cb.setChecked(True)
+        self.autoplay_cb.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+
+        self.osc_log_cb = QCheckBox("OSC log")
+        self.osc_log_cb.setChecked(True)
+        self.osc_log_cb.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+
+        self.time_label = QLabel("0.00 / 0.00s")
+        self.time_label.setStyleSheet("color: #9a9a9a; font-size: 11px;")
+
+        # Put "Select Audio Folder" before Pause/Play to keep this as a single compact bar.
+        transport.addWidget(self.load_button)
+        transport.addWidget(self.play_button)
+        transport.addWidget(self.autoplay_cb)
+        transport.addWidget(self.osc_log_cb)
+        transport.addStretch(1)
+        transport.addWidget(self.time_label)
+
+        layout.addLayout(transport)
         
         self.setLayout(layout)
         
@@ -122,9 +344,121 @@ class AudioViewerWidget(QWidget):
         self.duration = None
         self.metadata = {}
         self.context_text = ""  # For longer descriptions from RTF/TXT
+
+        # Features + transport state
+        self.features = AudioFeatureTimeline()
+        self.is_playing = False
+        self.playhead_t = 0.0
+        self._last_ui_redraw = 0.0
+        self._last_play_monotonic: Optional[float] = None
+
+        # Cached rendering (to keep playback smooth)
+        self._cache_dirty = True
+        self._cached_base_qimage: Optional[QImage] = None
+        self._cached_wave_box: Optional[tuple[int, int, int, int]] = None  # x0,y0,x1,y1 for playhead
+        self._mono_font = QApplication.font()
+
+        # OSC client for pattern controller (set by parent window)
+        self.osc_client = None
+        self.osc_enabled = False
+        self.pattern_max = 8
+        self.pattern_count = 7
+        self._last_trigger_t = 0.0
+        self._silence_since: Optional[float] = None
+        self._last_osc_print_monotonic = 0.0
+        self._last_sent_pattern: Optional[int] = None
+
+        # Playback tick timer
+        self.play_timer = QTimer(self)
+        self.play_timer.timeout.connect(self._tick_playback)
+        self.play_timer.start(33)  # ~30fps
+
+        self.play_button.clicked.connect(self.toggle_play)
         
         # Initial render
         self.update_display()
+
+    def _pick_next_audio_file(self) -> Optional[Path]:
+        """
+        Pick the next audio file to load.
+        We choose randomly but try to avoid repeating the current file.
+        """
+        if not self.audio_files:
+            return None
+        if len(self.audio_files) == 1:
+            return self.audio_files[0]
+
+        current = self.current_file
+        # Try a few times to pick a different file.
+        for _ in range(8):
+            candidate = random.choice(self.audio_files)
+            if current is None or candidate != current:
+                return candidate
+        return random.choice(self.audio_files)
+
+    def load_next_audio(self):
+        """Load another audio file from the folder and keep feature playback running."""
+        if not self.audio_files:
+            return
+        next_file = self._pick_next_audio_file()
+        if next_file is None:
+            return
+        self.current_file = next_file
+        self._load_audio_file(next_file)
+
+    def _load_audio_file(self, audio_path: Path):
+        """Load a specific audio file (and its context), extract features, refresh cache/UI."""
+        # Look for accompanying .txt or .rtf metadata file
+        txt_file = audio_path.with_suffix('.txt')
+        rtf_file = audio_path.with_suffix('.rtf')
+
+        self.context_text = ""
+        if rtf_file.exists():
+            try:
+                with open(rtf_file, 'r', encoding='utf-8', errors='ignore') as f:
+                    raw_content = f.read()
+                    self.context_text = strip_rtf(raw_content)
+                print(f"Loaded context from RTF: {rtf_file.name}")
+                self._cache_dirty = True
+            except Exception as e:
+                print(f"Error reading RTF file: {e}")
+        elif txt_file.exists():
+            try:
+                with open(txt_file, 'r', encoding='utf-8') as f:
+                    self.context_text = f.read().strip()
+                print(f"Loaded context from TXT: {txt_file.name}")
+                self._cache_dirty = True
+            except Exception as e:
+                print(f"Error reading TXT file: {e}")
+
+        if not LIBROSA_AVAILABLE:
+            print("Librosa not available - cannot load audio")
+            return
+
+        try:
+            print(f"Loading audio: {audio_path.name}")
+            # Load audio with librosa (analysis-friendly SR, full duration)
+            self.audio_data, self.sample_rate = librosa.load(str(audio_path), sr=22050, mono=True)
+            self.duration = len(self.audio_data) / self.sample_rate
+
+            # Extract metadata
+            self.metadata = {
+                'filename': audio_path.name,
+                'duration': f"{self.duration:.2f}s",
+                'sample_rate': f"{self.sample_rate}Hz",
+            }
+
+            print(f"Loaded: {audio_path.name} ({self.duration:.2f}s)")
+            self._extract_features()
+            self._cache_dirty = True
+
+            # Keep playback running if we were playing or autoplay is enabled
+            if self.is_playing or self.autoplay_cb.isChecked():
+                self.start_play()
+            self.update_display()
+        except Exception as e:
+            print(f"Error loading audio: {e}")
+            self.audio_data = None
     
     def select_folder(self):
         """Select folder containing audio files."""
@@ -157,88 +491,274 @@ class AudioViewerWidget(QWidget):
         """Load a random audio file from the folder."""
         if not self.audio_files:
             return
-        
-        # Pick random file
-        random_file = random.choice(self.audio_files)
+
+        random_file = self._pick_next_audio_file()
+        if random_file is None:
+            return
         self.current_file = random_file
-        
-        # Look for accompanying .txt or .rtf metadata file
-        txt_file = random_file.with_suffix('.txt')
-        rtf_file = random_file.with_suffix('.rtf')
-        
-        metadata_text = []
-        self.context_text = ""
-        
-        # Try RTF first, then TXT
-        context_file = None
-        if rtf_file.exists():
-            context_file = rtf_file
-            try:
-                with open(rtf_file, 'r', encoding='utf-8', errors='ignore') as f:
-                    raw_content = f.read()
-                    # Strip RTF formatting
-                    self.context_text = strip_rtf(raw_content)
-                print(f"Loaded context from RTF: {rtf_file.name}")
-            except Exception as e:
-                print(f"Error reading RTF file: {e}")
-        elif txt_file.exists():
-            context_file = txt_file
-            try:
-                with open(txt_file, 'r', encoding='utf-8') as f:
-                    self.context_text = f.read().strip()
-                print(f"Loaded context from TXT: {txt_file.name}")
-            except Exception as e:
-                print(f"Error reading TXT file: {e}")
-        
-        if LIBROSA_AVAILABLE:
-            try:
-                print(f"Loading audio: {random_file.name}")
-                # Load audio with librosa
-                self.audio_data, self.sample_rate = librosa.load(str(random_file), sr=None, duration=30)
-                self.duration = len(self.audio_data) / self.sample_rate
-                
-                # Extract metadata
-                self.metadata = {
-                    'filename': random_file.name,
-                    'duration': f"{self.duration:.2f}s",
-                    'sample_rate': f"{self.sample_rate}Hz",
-                }
-                
-                print(f"Loaded: {random_file.name} ({self.duration:.2f}s)")
-                self.update_display()
-                
-            except Exception as e:
-                print(f"Error loading audio: {e}")
-                self.audio_data = None
+        self._load_audio_file(random_file)
+
+    def set_osc(self, enabled: bool, client, pattern_max: int = 8):
+        self.osc_enabled = bool(enabled) and client is not None
+        self.osc_client = client
+        self.pattern_max = int(max(1, pattern_max))
+        self.pattern_count = min(self.pattern_max, 7)
+        if self.osc_enabled:
+            # Note: host/port are set in IMOLGraphicScoreWindow; client repr may include them.
+            print(f"[AUDIO/OSC] enabled client={type(client).__name__} pattern_max={self.pattern_max} pattern_count={self.pattern_count}")
         else:
-            print("Librosa not available - cannot load audio")
+            if enabled:
+                print("[AUDIO/OSC] requested but disabled (no client). Check --osc-out-enable and python-osc.")
+            else:
+                print("[AUDIO/OSC] disabled")
+
+    def _osc_send(self, address: str, value):
+        if not self.osc_enabled or self.osc_client is None:
+            return
+        # Terminal logging (rate-limited)
+        if self.osc_log_cb.isChecked():
+            now = time.monotonic()
+            if (now - self._last_osc_print_monotonic) > 0.02:
+                self._last_osc_print_monotonic = now
+                pat = self.features.label_at(self.playhead_t) if self.features.is_valid else 0
+                print(f"[AUDIO/OSC] t={self.playhead_t:6.2f}s pattern={pat} -> {address} {value}")
+        try:
+            self.osc_client.send_message(address, value)
+        except Exception as exc:
+            if self.osc_log_cb.isChecked():
+                print(f"[AUDIO/OSC] send failed {address} {value}: {exc}")
+
+    def start_play(self):
+        self.is_playing = True
+        self.play_button.setText("Pause")
+        self._last_play_monotonic = time.monotonic()
+        print("[AUDIO] play features")
+
+    def stop_play(self):
+        self.is_playing = False
+        self.play_button.setText("Play")
+        self._last_play_monotonic = None
+        print("[AUDIO] pause features")
+
+    def toggle_play(self):
+        if not self.features.is_valid:
+            return
+        if self.is_playing:
+            self.stop_play()
+        else:
+            self.start_play()
+
+    def _extract_features(self):
+        """Extract audio features for visualization + OSC scheduling."""
+        self.features = AudioFeatureTimeline()
+        if self.audio_data is None or not LIBROSA_AVAILABLE:
+            return
+        y = self.audio_data
+        sr = int(self.sample_rate or 22050)
+
+        # Feature frame rate (hop)
+        hop = 512
+
+        rms = librosa.feature.rms(y=y, frame_length=2048, hop_length=hop)[0]
+        onset = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+        centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop)[0]
+        bandwidth = librosa.feature.spectral_bandwidth(y=y, sr=sr, hop_length=hop)[0]
+        flatness = librosa.feature.spectral_flatness(y=y, hop_length=hop)[0]
+        rolloff = librosa.feature.spectral_rolloff(y=y, sr=sr, hop_length=hop, roll_percent=0.85)[0]
+        mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=8, hop_length=hop)  # (8, frames)
+
+        t = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop).astype(np.float32)
+        n = min(len(t), len(rms), len(onset), len(centroid), len(bandwidth), len(flatness), len(rolloff), mfcc.shape[1])
+        t = t[:n]
+
+        self.features.t = t
+        self.features.rms = rms[:n].astype(np.float32)
+        self.features.onset = onset[:n].astype(np.float32)
+        self.features.centroid = centroid[:n].astype(np.float32)
+        self.features.bandwidth = bandwidth[:n].astype(np.float32)
+        self.features.flatness = flatness[:n].astype(np.float32)
+        self.features.rolloff = rolloff[:n].astype(np.float32)
+        self.features.duration = float(self.duration or (float(t[-1]) if t.size else 0.0))
+        self.features.pattern_count = int(max(2, self.pattern_count))
+
+        # --- ML clustering into pattern states (k=pattern_count) ---
+        # Goal: multiple patterns within ONE file. Clustering per-frame is too noisy and often collapses.
+        # So we cluster on WINDOWED feature vectors (e.g. ~1s windows) and expand to the full timeline.
+        mfcc_n = mfcc[:, :n].astype(np.float32)
+        X = np.concatenate([
+            _norm01(self.features.rms)[:, None],
+            _norm01(self.features.onset)[:, None],
+            _norm01(self.features.centroid)[:, None],
+            _norm01(self.features.bandwidth)[:, None],
+            _norm01(self.features.flatness)[:, None],
+            _norm01(self.features.rolloff)[:, None],
+            _norm01(mfcc_n.T),  # (frames, 8)
+        ], axis=1).astype(np.float32)
+
+        frame_dt = float(hop) / float(sr)
+        win_sec = 1.0
+        win = int(max(8, round(win_sec / max(1e-6, frame_dt))))
+        step = int(max(1, win // 2))
+
+        # Build windowed features by averaging inside each window
+        starts = list(range(0, X.shape[0] - win + 1, step))
+        if not starts:
+            starts = [0]
+            win = min(win, X.shape[0])
+        Xw = np.stack([X[s:s + win].mean(axis=0) for s in starts], axis=0)
+
+        # z-score on windowed vectors
+        mu = Xw.mean(axis=0, keepdims=True)
+        sig = Xw.std(axis=0, keepdims=True) + 1e-6
+        Xw_z = (Xw - mu) / sig
+
+        seed = abs(hash(str(self.current_file))) % (2**31) if self.current_file else 0
+        k = int(self.features.pattern_count)
+        labels_w = _kmeans_fit_predict(Xw_z, k=k, seed=seed, iters=40)
+
+        # Expand window labels back to per-frame labels (piecewise-constant)
+        labels = np.zeros((X.shape[0],), dtype=np.int16)
+        for i, s in enumerate(starts):
+            e = min(X.shape[0], s + step)
+            labels[s:e] = labels_w[i]
+        # tail fill
+        if starts:
+            tail_start = starts[-1] + step
+            if tail_start < X.shape[0]:
+                labels[tail_start:] = labels_w[-1]
+        self.features.cluster_labels = labels
+
+        # Stable mapping: order clusters by (mean centroid, mean rms) so patterns feel consistent
+        cluster_stats = []
+        for cid in range(k):
+            m = labels == cid
+            if not np.any(m):
+                cluster_stats.append((cid, 0.0, 0.0))
+                continue
+            c_mean = float(self.features.centroid[m].mean())
+            r_mean = float(self.features.rms[m].mean())
+            cluster_stats.append((cid, c_mean, r_mean))
+        cluster_stats.sort(key=lambda x: (x[1], x[2]))  # low->high
+        self.features.cluster_to_pattern = {cid: (i + 1) for i, (cid, _, _) in enumerate(cluster_stats)}
+
+        # Debug: distribution + mapping
+        counts = np.bincount(labels.astype(np.int32), minlength=k).tolist()
+        mapping_str = " ".join([f"{cid}->{self.features.cluster_to_pattern.get(cid,1)}" for cid in range(k)])
+        print(f"[AUDIO] clustered k={k} seed={seed} counts={counts} map={mapping_str}")
+
+        self.playhead_t = 0.0
+        self._last_trigger_t = 0.0
+        self._silence_since = None
+        self._cache_dirty = True
+        self._last_sent_pattern = None
+        if self.features.is_valid:
+            print(f"[AUDIO] features extracted frames={self.features.t.size} duration={self.features.duration:0.2f}s sr={sr} hop={hop}")
+
+    def _tick_playback(self):
+        """Advance playhead and emit OSC based on features."""
+        if not self.is_playing or not self.features.is_valid:
+            return
+
+        # Advance time using real elapsed (keeps time consistent even if UI drops frames)
+        now_m = time.monotonic()
+        if self._last_play_monotonic is None:
+            self._last_play_monotonic = now_m
+        dt = now_m - self._last_play_monotonic
+        self._last_play_monotonic = now_m
+        dt = float(np.clip(dt, 0.0, 0.2))
+
+        self.playhead_t += dt
+        if self.playhead_t >= self.features.duration:
+            # End of "feature playback": load a new file and keep going.
+            if self.autoplay_cb.isChecked() and self.audio_files:
+                # Schedule to avoid doing heavy work inside the timer callback.
+                QTimer.singleShot(0, self.load_next_audio)
+                return
+            self.playhead_t = 0.0
+
+        # Update time label
+        self.time_label.setText(f"{self.playhead_t:0.2f} / {self.features.duration:0.2f}s")
+
+        # Pattern detection from ML labels (only /pattern N is sent)
+        pattern_n = self.features.label_at(self.playhead_t)
+
+        now = time.monotonic()
+        redraw_due = (now - self._last_ui_redraw) > 0.12
+        if redraw_due:
+            self._last_ui_redraw = now
+            self.update_display()
+
+        if not self.osc_enabled or self.osc_client is None:
+            return
+
+        # Debounce: only send when pattern changes, with a minimum hold time
+        min_hold = 0.40
+        if self._last_sent_pattern is None:
+            self._last_sent_pattern = pattern_n
+            self._last_trigger_t = self.playhead_t
+            self._osc_send("/pattern", int(pattern_n))
+            return
+
+        if pattern_n != self._last_sent_pattern and (self.playhead_t - self._last_trigger_t) >= min_hold:
+            self._last_sent_pattern = pattern_n
+            self._last_trigger_t = self.playhead_t
+            self._osc_send("/pattern", int(pattern_n))
     
     def update_display(self):
-        """Render the audio viewer panel with real analysis."""
+        """Render the audio viewer panel (cached to keep playback smooth)."""
+        if self.audio_data is not None and self._cached_base_qimage is not None and not self._cache_dirty:
+            img = self._cached_base_qimage.copy()
+            if self.features.is_valid and self._cached_wave_box is not None:
+                x0, y0, x1, y1 = self._cached_wave_box
+                w = max(1, x1 - x0)
+                ph = float(np.clip(self.playhead_t / max(1e-6, self.features.duration), 0.0, 1.0))
+                px = x0 + int(ph * w)
+                painter = QPainter(img)
+                painter.setRenderHint(QPainter.Antialiasing, False)
+                painter.setFont(self._mono_font)
+                pen = QPen(QColor(230, 230, 230))
+                pen.setWidth(1)
+                painter.setPen(pen)
+                painter.drawLine(px, y0, px, y1)
+
+                # Dynamic pattern label (must NOT be cached, otherwise it looks stuck)
+                pat = self.features.label_at(self.playhead_t)
+                font = QFont(self._mono_font)
+                font.setPointSize(11)
+                painter.setFont(font)
+                painter.setPen(QPen(QColor(210, 210, 210)))
+                metrics = QFontMetrics(font)
+                painter.drawText(int(x0 + 4), int(y0 + 2 + metrics.ascent()), f"pattern={pat}")
+                painter.end()
+            self.display_label.setPixmap(QPixmap.fromImage(img))
+            return
+
         canvas = np.zeros((self.viewer_height - 40, self.viewer_width, 3), dtype=np.uint8)
+
+        # Collect text overlays to draw with Qt (single font everywhere).
+        text_overlays: list[tuple[str, int, int, QColor, int]] = []
+        # tuple: (text, x, y, color, point_size)
+        mono_color = QColor(210, 210, 210)
+        dim_color = QColor(160, 160, 160)
         
         if self.audio_data is None:
             # No audio loaded - centered message
             center_y = (self.viewer_height - 40) // 2
             if self.audio_folder:
-                msg = f"Folder: {Path(self.audio_folder).name}"
-                cv2.putText(canvas, msg, (self.viewer_width // 2 - 140, center_y - 15),
-                           cv2.FONT_HERSHEY_DUPLEX, 0.5, (160, 160, 160), 1, cv2.LINE_AA)
-                msg2 = f"Files found: {len(self.audio_files)}"
-                cv2.putText(canvas, msg2, (self.viewer_width // 2 - 90, center_y + 15),
-                           cv2.FONT_HERSHEY_DUPLEX, 0.4, (120, 120, 120), 1, cv2.LINE_AA)
+                msg = f"folder={Path(self.audio_folder).name}"
+                msg2 = f"files={len(self.audio_files)}"
+                text_overlays.append((msg, 20, center_y - 12, mono_color, 12))
+                text_overlays.append((msg2, 20, center_y + 8, dim_color, 12))
             else:
-                msg = "Click 'Select Audio Folder' below"
-                cv2.putText(canvas, msg, (self.viewer_width // 2 - 170, center_y),
-                           cv2.FONT_HERSHEY_DUPLEX, 0.5, (120, 120, 120), 1, cv2.LINE_AA)
+                msg = "select an audio folder"
+                text_overlays.append((msg, 20, center_y, dim_color, 12))
         else:
             # Audio loaded - display analysis
             y_pos = 20
             
-            # Basic file info (top, single line with all metadata)
-            info_text = f"File: {self.metadata.get('filename', 'N/A')}   Duration: {self.metadata.get('duration', 'N/A')}   SR: {self.metadata.get('sample_rate', 'N/A')}"
-            cv2.putText(canvas, info_text, (10, y_pos),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.38, (0, 255, 0), 1, cv2.LINE_AA)
+            # Basic file info (terminal-like, compact)
+            info_text = f"file={self.metadata.get('filename', 'N/A')}  dur={self.metadata.get('duration', 'N/A')}  sr={self.metadata.get('sample_rate', 'N/A')}"
+            text_overlays.append((_ellipsize_cv_text(info_text, self.viewer_width - 20, cv2.FONT_HERSHEY_DUPLEX, 0.38, 1), 10, y_pos, mono_color, 12))
             y_pos += 28
             
             # Two-column layout: Context (left) | Waveform (right)
@@ -252,43 +772,22 @@ class AudioViewerWidget(QWidget):
                 context_right = split_x - 5
                 context_top = middle_section_top
                 context_bottom = context_top + middle_section_height
-                
-                # Draw context box
-                cv2.rectangle(canvas, (context_left, context_top), (context_right, context_bottom), (20, 20, 20), -1)
-                cv2.rectangle(canvas, (context_left, context_top), (context_right, context_bottom), (255, 150, 0), 1)
-                
-                # Context label - modern hierarchy
-                cv2.putText(canvas, "AUDIO META DATA", (context_left + 6, context_top + 16),
-                           cv2.FONT_HERSHEY_DUPLEX, 0.32, (255, 150, 0), 1, cv2.LINE_AA)
-                cv2.putText(canvas, "CONTEXT OF THE AUDIO", (context_left + 6, context_top + 32),
-                           cv2.FONT_HERSHEY_DUPLEX, 0.32, (255, 150, 0), 1, cv2.LINE_AA)
-                
-                # Word wrap the context text
-                words = self.context_text.split()
-                lines = []
-                current_line = ""
-                max_width = (context_right - context_left) - 20
-                
-                for word in words:
-                    test_line = current_line + " " + word if current_line else word
-                    (text_w, text_h), _ = cv2.getTextSize(test_line, cv2.FONT_HERSHEY_DUPLEX, 0.36, 1)
-                    
-                    if text_w <= max_width:
-                        current_line = test_line
-                    else:
-                        if current_line:
-                            lines.append(current_line)
-                        current_line = word
-                
-                if current_line:
-                    lines.append(current_line)
-                
-                # Draw lines (max 8 lines to fit in the box with better spacing)
-                text_y = context_top + 54
-                for line in lines[:8]:
-                    cv2.putText(canvas, line, (context_left + 8, text_y),
-                               cv2.FONT_HERSHEY_DUPLEX, 0.36, (210, 210, 210), 1, cv2.LINE_AA)
-                    text_y += 18
+
+                # Terminal-style wrapped context block (no overlap, multiple lines)
+                excerpt = _sanitize_context(self.context_text)
+                # Define a strict text rectangle
+                pad_x = 6
+                pad_y = 6
+                rect_x0 = context_left + pad_x
+                rect_y0 = context_top + pad_y
+                rect_w = max(1, (context_right - context_left) - 2 * pad_x)
+                rect_h = max(1, (context_bottom - context_top) - 2 * pad_y)
+
+                # We'll render this via Qt after the image conversion, using global font metrics.
+                text_overlays.append((
+                    f"__BLOCK__{rect_x0},{rect_y0},{rect_w},{rect_h}::{excerpt}",
+                    0, 0, dim_color, 12
+                ))
             
             # RIGHT COLUMN: Waveform
             waveform_left = split_x + 5
@@ -296,19 +795,110 @@ class AudioViewerWidget(QWidget):
             waveform_top = middle_section_top
             waveform_height = middle_section_height
             self._draw_waveform_in_box(canvas, waveform_left, waveform_top, waveform_right - waveform_left, waveform_height)
+
+            # Overlay feature traces inside waveform box (static); playhead is drawn separately for caching
+            if self.features.is_valid:
+                self._draw_feature_traces(canvas, waveform_left, waveform_top, waveform_right - waveform_left, waveform_height)
+                # Store playhead bounds for fast redraw
+                x0, y0 = waveform_left + 5, waveform_top + 25
+                x1, y1 = waveform_right - 5, waveform_top + waveform_height - 8
+                self._cached_wave_box = (x0, y0, x1, y1)
             
             # BOTTOM: Full-width Spectrogram
             spectro_top = middle_section_top + middle_section_height + 15
             spectro_height = (self.viewer_height - 40) - spectro_top - 10
             if spectro_height > 40:  # Only draw if enough space
-                self._draw_spectrogram(canvas, spectro_top, spectro_height)
+                spec_overlays = self._draw_spectrogram(canvas, spectro_top, spectro_height)
+                if spec_overlays:
+                    text_overlays.extend(spec_overlays)
         
         # Convert to QPixmap
         rgb_image = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_image.shape
         bytes_per_line = ch * w
-        qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+
+        # Draw text overlays with Qt font (single typography)
+        painter = QPainter(qt_image)
+        painter.setRenderHint(QPainter.TextAntialiasing, True)
+        for text, x, y, color, pt in text_overlays:
+            font = QFont(self._mono_font)
+            font.setPointSize(int(pt))
+            painter.setFont(font)
+            painter.setPen(QPen(color))
+            metrics = QFontMetrics(font)
+
+            # Special case: block text wrapper marker
+            if isinstance(text, str) and text.startswith("__BLOCK__"):
+                try:
+                    header, body = text.split("::", 1)
+                    rect_part = header.replace("__BLOCK__", "", 1)
+                    rx, ry, rw, rh = [int(v) for v in rect_part.split(",")]
+                except Exception:
+                    continue
+
+                lines = _wrap_text_to_lines(body, metrics, rw)
+                line_h = metrics.height()
+                max_lines = max(1, rh // max(1, line_h))
+                if len(lines) > max_lines:
+                    lines = lines[:max_lines]
+                    # mark truncation on last line
+                    if lines:
+                        last = lines[-1]
+                        ell = "…"
+                        while last and metrics.horizontalAdvance(last + ell) > rw:
+                            last = last[:-1]
+                        lines[-1] = (last + ell) if last else ell
+
+                y_cursor = ry + metrics.ascent()
+                for ln in lines:
+                    painter.drawText(rx, y_cursor, ln)
+                    y_cursor += line_h
+                continue
+
+            # Normal single-line text: treat y as top-left within the canvas
+            baseline_y = int(y) + metrics.ascent()
+            painter.drawText(int(x), baseline_y, str(text))
+        painter.end()
+
         self.display_label.setPixmap(QPixmap.fromImage(qt_image))
+
+        # Cache the base render for fast subsequent playhead updates
+        if self.audio_data is not None:
+            self._cached_base_qimage = qt_image.copy()
+            self._cache_dirty = False
+
+    def _draw_feature_traces(self, canvas: np.ndarray, left: int, top: int, width: int, height: int):
+        """Draw RMS + onset as small static traces (no playhead)."""
+        t = self.features.t
+        if t.size < 2:
+            return
+
+        # Map to box coords
+        x0, y0 = left + 5, top + 25
+        x1, y1 = left + width - 5, top + height - 8
+        w = max(1, x1 - x0)
+        h = max(1, y1 - y0)
+
+        rms_n = _norm01(self.features.rms)
+        onset_n = _norm01(self.features.onset)
+
+        # Downsample to fit width
+        idxs = np.linspace(0, t.size - 1, w).astype(int)
+        rms_s = rms_n[idxs]
+        onset_s = onset_n[idxs]
+
+        # Draw traces
+        for i in range(1, w):
+            y_r0 = y1 - int(rms_s[i - 1] * (h * 0.35))
+            y_r1 = y1 - int(rms_s[i] * (h * 0.35))
+            cv2.line(canvas, (x0 + i - 1, y_r0), (x0 + i, y_r1), (220, 220, 220), 1)
+
+            y_o0 = y1 - int(onset_s[i - 1] * (h * 0.60))
+            y_o1 = y1 - int(onset_s[i] * (h * 0.60))
+            cv2.line(canvas, (x0 + i - 1, y_o0), (x0 + i, y_o1), (160, 160, 160), 1)
+
+        # Labels are drawn via Qt to keep typography consistent.
     
     def _draw_waveform_in_box(self, canvas: np.ndarray, left: int, top: int, width: int, height: int):
         """Draw waveform visualization in a specific box with green/cyan colors."""
@@ -321,14 +911,12 @@ class AudioViewerWidget(QWidget):
         box_bottom = top + height
         box_center = (box_top + box_bottom) // 2
         
-        # Draw background box
-        cv2.rectangle(canvas, (box_left, box_top), (box_right, box_bottom), (20, 20, 20), -1)
-        cv2.rectangle(canvas, (box_left, box_top), (box_right, box_bottom), (255, 150, 0), 1)
-        cv2.line(canvas, (box_left, box_center), (box_right, box_center), (50, 50, 50), 1)
-        
-        # Label - clean modern font
-        cv2.putText(canvas, "WAVEFORM", (box_left + 6, box_top + 16),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.32, (255, 150, 0), 1, cv2.LINE_AA)
+        # Draw background box (minimal terminal look)
+        cv2.rectangle(canvas, (box_left, box_top), (box_right, box_bottom), (16, 16, 16), -1)
+        cv2.rectangle(canvas, (box_left, box_top), (box_right, box_bottom), (50, 50, 50), 1)
+        cv2.line(canvas, (box_left, box_center), (box_right, box_center), (40, 40, 40), 1)
+
+        # Label is drawn via Qt to keep typography consistent.
         
         # Waveform drawing area (with margins)
         draw_left = box_left + 5
@@ -359,24 +947,30 @@ class AudioViewerWidget(QWidget):
                     
                     # Draw line with GREEN color (matching active detections)
                     screen_x = draw_left + x
-                    cv2.line(canvas, (screen_x, y_max), (screen_x, y_min), (0, 255, 0), 1)
+                    cv2.line(canvas, (screen_x, y_max), (screen_x, y_min), (220, 220, 220), 1)
     
     def _draw_spectrogram(self, canvas: np.ndarray, top: int, height: int):
-        """Draw spectrogram visualization with green/cyan colormap."""
+        """
+        Draw spectrogram visualization (white/grey on dark background) plus a minimal
+        frequency scale (Hz) to give more information from the analysis.
+        Returns Qt text overlays: list[(text, x, y, QColor, point_size)].
+        """
         if self.audio_data is None or not LIBROSA_AVAILABLE:
-            return
+            return []
         
-        # Label - modern clean font
-        label_y = top
-        cv2.putText(canvas, "SPECTROGRAM", (10, label_y + 16),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.32, (255, 150, 0), 1, cv2.LINE_AA)
+        # Label is drawn via Qt to keep typography consistent.
         
         try:
-            # Compute spectrogram
-            n_fft = 2048
-            hop_length = 512
-            D = librosa.stft(self.audio_data, n_fft=n_fft, hop_length=hop_length)
-            S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+            # Compute spectrogram ONCE per file by caching the normalized matrix
+            if not hasattr(self, "_spectro_cache") or self._cache_dirty or getattr(self, "_spectro_cache", None) is None:
+                n_fft = 2048
+                hop_length = 512
+                D = librosa.stft(self.audio_data, n_fft=n_fft, hop_length=hop_length)
+                S_db = librosa.amplitude_to_db(np.abs(D), ref=np.max)
+                S_normalized = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-8)
+                self._spectro_cache = S_normalized.astype(np.float32)
+            else:
+                S_normalized = self._spectro_cache
             
             # Resize spectrogram to fit display
             margin_left = 10
@@ -389,41 +983,72 @@ class AudioViewerWidget(QWidget):
             box_height = box_bottom - box_top
             
             if box_height <= 0:
-                return
+                return []
+
+            # Reserve a small left gutter for frequency scale (terminal style)
+            axis_w = 52
+            axis_w = min(axis_w, max(28, box_width // 6))
+            spec_left = box_left + axis_w
+            spec_right = box_right
+            spec_width = max(1, spec_right - spec_left)
             
-            # Normalize and resize
-            S_normalized = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-8)
-            S_resized = cv2.resize(S_normalized, (box_width, box_height), interpolation=cv2.INTER_LINEAR)
+            # Resize
+            S_resized = cv2.resize(S_normalized, (spec_width, box_height), interpolation=cv2.INTER_LINEAR)
+
+            # Vectorized grayscale mapping (white/grey spectrogram on dark background)
+            S = np.flipud(S_resized)  # flip vertically
+            gamma = 0.60
+            gray = (np.power(S.clip(0.0, 1.0), gamma) * 255.0).clip(0, 255).astype(np.uint8)
+            img_bgr = np.dstack([gray, gray, gray]).astype(np.uint8)
+
+            y0 = box_top
+            y1 = box_bottom
+            x0 = spec_left
+            x1 = spec_right
+            canvas[y0:y1, x0:x1] = img_bgr[: (y1 - y0), : (x1 - x0)]
             
-            # Convert to green/cyan colormap (matching detection colors)
-            for y in range(box_height):
-                for x in range(box_width):
-                    intensity = S_resized[y, x]
-                    
-                    # Green to Cyan gradient
-                    # Low intensity: black (0, 0, 0)
-                    # Medium intensity: green (0, 255, 0)
-                    # High intensity: cyan (255, 255, 0) or white
-                    
-                    if intensity < 0.5:
-                        # Black to Green
-                        val = intensity * 2.0
-                        r, g, b = 0, int(val * 255), 0
-                    else:
-                        # Green to Cyan/White
-                        val = (intensity - 0.5) * 2.0
-                        r, g, b = int(val * 255), 255, int(val * 150)
-                    
-                    canvas_y = box_bottom - y - 1  # Flip vertically
-                    canvas_x = box_left + x
-                    if 0 <= canvas_y < canvas.shape[0] and 0 <= canvas_x < canvas.shape[1]:
-                        canvas[canvas_y, canvas_x] = (b, g, r)  # BGR
-            
-            # Draw border with cyan
-            cv2.rectangle(canvas, (box_left, box_top), (box_right, box_bottom), (255, 150, 0), 1)
+            # Axis gutter background + separator
+            cv2.rectangle(canvas, (box_left, box_top), (spec_left, box_bottom), (16, 16, 16), -1)
+            cv2.line(canvas, (spec_left, box_top), (spec_left, box_bottom), (50, 50, 50), 1)
+
+            # Draw border around the full spectrogram box
+            cv2.rectangle(canvas, (box_left, box_top), (box_right, box_bottom), (50, 50, 50), 1)
+
+            # Frequency ticks (Hz): minimal, readable, cheap to draw
+            sr = int(self.sample_rate or 22050)
+            nyq = max(1.0, sr / 2.0)
+            # Use a small set of informative ticks; clamp to Nyquist.
+            base_ticks = [0, 250, 500, 1000, 2000, 4000, 8000, int(nyq)]
+            ticks = []
+            for f in base_ticks:
+                ff = int(min(max(0, f), int(nyq)))
+                if ticks and ff == ticks[-1]:
+                    continue
+                if ff not in ticks:
+                    ticks.append(ff)
+
+            overlays: list[tuple[str, int, int, QColor, int]] = []
+            dim = QColor(160, 160, 160)
+            # Axis label
+            overlays.append(("Hz", box_left + 6, box_top - 16, dim, 10))
+
+            for f in ticks:
+                # y=0 is top (high freq) because of flipud; 0 Hz at bottom.
+                y = int(round((1.0 - (float(f) / nyq)) * (box_height - 1))) + box_top
+                y = max(box_top, min(box_bottom - 1, y))
+                # Tick mark
+                cv2.line(canvas, (spec_left - 6, y), (spec_left - 1, y), (80, 80, 80), 1)
+                # Subtle horizontal guide (very low contrast)
+                cv2.line(canvas, (spec_left + 1, y), (box_right - 2, y), (26, 26, 26), 1)
+                # Text (Qt overlay; y is top-left)
+                label = f"{f}" if f < 1000 else (f"{f//1000}k" if f % 1000 == 0 else f"{f/1000.0:.1f}k")
+                overlays.append((label, box_left + 6, y - 6, dim, 10))
+
+            return overlays
             
         except Exception as e:
             print(f"Error drawing spectrogram: {e}")
+            return []
 
 
 class CVAnalysisWidget(QLabel):
@@ -436,12 +1061,28 @@ class CVAnalysisWidget(QLabel):
         self.setFixedSize(width, height)
         self.setStyleSheet("background-color: black; border: 1px solid #333;")
     
-    def display_cv_image(self, cv_image: np.ndarray):
-        """Convert OpenCV BGR image to QPixmap and display."""
+    def display_cv_image(self, cv_image: np.ndarray, overlays: Optional[list] = None):
+        """
+        Convert OpenCV BGR image to QPixmap and display.
+        overlays: optional list of (text, x, y, QColor, point_size) drawn with Qt typography.
+        """
         rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb_image.shape
         bytes_per_line = ch * w
-        qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        qt_image = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+
+        if overlays:
+            painter = QPainter(qt_image)
+            painter.setRenderHint(QPainter.TextAntialiasing, True)
+            painter.setFont(QApplication.font())
+            for text, x, y, color, pt in overlays:
+                font = QFont(QApplication.font())
+                font.setPointSize(int(pt))
+                painter.setFont(font)
+                painter.setPen(QPen(color))
+                painter.drawText(int(x), int(y), str(text))
+            painter.end()
+
         self.setPixmap(QPixmap.fromImage(qt_image))
 
 
@@ -1094,7 +1735,15 @@ class IMOLGraphicScoreWindow(QMainWindow):
         
         # Calculate panel dimensions
         self.panel_width = args.window_width // 2
-        
+
+        # OSC client for pattern controller (must exist before build_ui() wiring)
+        self.osc_client = None
+        if OSC_AVAILABLE and args.osc_out_enable:
+            try:
+                self.osc_client = SimpleUDPClient(args.osc_out_host, int(args.osc_out_port))
+            except Exception:
+                self.osc_client = None
+
         # Build UI
         self.build_ui()
         
@@ -1230,6 +1879,11 @@ class IMOLGraphicScoreWindow(QMainWindow):
         # Right: Audio Analysis (fills entire right side)
         self.audio_viewer = AudioViewerWidget(self.panel_width, self.args.top_panel_height)
         self.audio_viewer.load_button.clicked.connect(self.audio_viewer.select_folder)
+        self.audio_viewer.set_osc(
+            enabled=bool(self.args.osc_out_enable),
+            client=self.osc_client,
+            pattern_max=int(self.args.osc_pattern_max),
+        )
         
         top_row.addWidget(cv_container)
         top_row.addWidget(self.audio_viewer)
@@ -1627,12 +2281,11 @@ class IMOLGraphicScoreWindow(QMainWindow):
             msg1 = "Learning background..."
             msg2 = f"{progress}%"
             
-            cv2.putText(learning_vis, msg1, (self.panel_width//2 - 120, (self.args.top_panel_height - 50)//2 - 20),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.7, (255, 255, 255), 1, cv2.LINE_AA)
-            cv2.putText(learning_vis, msg2, (self.panel_width//2 - 40, (self.args.top_panel_height - 50)//2 + 20),
-                       cv2.FONT_HERSHEY_DUPLEX, 0.7, (220, 220, 220), 1, cv2.LINE_AA)
-            
-            self.cv_widget.display_cv_image(learning_vis)
+            overlays = [
+                (msg1, 20, (self.args.top_panel_height - 50)//2 - 10, QColor(230, 230, 230), 18),
+                (msg2, 20, (self.args.top_panel_height - 50)//2 + 20, QColor(200, 200, 200), 18),
+            ]
+            self.cv_widget.display_cv_image(learning_vis, overlays=overlays)
             return
         
         if self.learning_phase:
@@ -1689,20 +2342,19 @@ class IMOLGraphicScoreWindow(QMainWindow):
         state_label = self.geometry_analyzer.get_temporal_state()
         num_detections = len(geometry['detections'])
         
-        # Enhanced info box with modern fonts
+        # Enhanced info box (text via Qt for consistent typography)
         cv2.rectangle(cv_vis, (5, 5), (250, 98), (0, 0, 0), -1)
         cv2.rectangle(cv_vis, (5, 5), (250, 98), (60, 60, 60), 1)
-        cv2.putText(cv_vis, f"{state_label}", (12, 26),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.5, (255, 255, 255), 1, cv2.LINE_AA)
-        cv2.putText(cv_vis, f"Total: {num_detections}", (12, 50),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.42, (210, 210, 210), 1, cv2.LINE_AA)
-        cv2.putText(cv_vis, f"Active: {active_count}", (12, 72),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.42, (0, 255, 0), 1, cv2.LINE_AA)
-        cv2.putText(cv_vis, f"Stable: {stable_count}", (12, 92),
-                   cv2.FONT_HERSHEY_DUPLEX, 0.42, (255, 150, 0), 1, cv2.LINE_AA)
-        
+
+        overlays = [
+            (f"{state_label}", 12, 26, QColor(230, 230, 230), 13),
+            (f"total={num_detections}", 12, 50, QColor(200, 200, 200), 12),
+            (f"active={active_count}", 12, 72, QColor(10, 132, 255), 12),
+            (f"stable={stable_count}", 12, 92, QColor(200, 200, 200), 12),
+        ]
+
         # Update displays
-        self.cv_widget.display_cv_image(cv_vis)
+        self.cv_widget.display_cv_image(cv_vis, overlays=overlays)
         
         # Update graphic score with the actual light shapes from the adjusted frame
         # Pass the inverted image where light appears dark - the score will flip it
@@ -1719,6 +2371,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="IMOL CV graphic score system with Qt GUI."
     )
+    parser.add_argument(
+        "--preset",
+        type=str,
+        default="",
+        help="Apply a preset of visual/score parameters (e.g. 'spectro_mean').",
+    )
     parser.add_argument("--camera-index", type=int, default=0,
                        help="Camera device index (default: 0)")
     parser.add_argument("--window-width", type=int, default=1920,
@@ -1733,6 +2391,16 @@ def main():
                        help="Target FPS (default: 30)")
     parser.add_argument("--bg-learning", type=int, default=120,
                        help="Background learning frames (default: 120)")
+
+    # OSC output (to IMOL_PATTERN_CONTROLLER_QT)
+    parser.add_argument("--osc-out-enable", action="store_true",
+                        help="Enable OSC output for pattern control")
+    parser.add_argument("--osc-out-host", type=str, default="127.0.0.1",
+                        help="OSC destination host (default: 127.0.0.1)")
+    parser.add_argument("--osc-out-port", type=int, default=9000,
+                        help="OSC destination port (default: 9000)")
+    parser.add_argument("--osc-pattern-max", type=int, default=8,
+                        help="Max pattern index to target for /pattern mapping (default: 8)")
 
     # --- Graphic score aesthetics (rendering only) ---
     parser.add_argument("--score-decay", type=float, default=1.0,
@@ -1783,8 +2451,49 @@ def main():
                        help="In spectrogram slice mode, x-step between consecutive slices (default: 1)")
     
     args = parser.parse_args()
+
+    # ---------------------- Presets (avoid long CLI runs) ----------------------
+    # Apply only if the user didn't explicitly pass the relevant flags.
+    argv = sys.argv[1:]
+
+    def _cli_has(prefix: str) -> bool:
+        return any(a == prefix or a.startswith(prefix + "=") for a in argv)
+
+    preset = (args.preset or "").strip().lower()
+    if preset in ("spectro_mean", "spectrogram", "spectro"):
+        # Matches your current preferred launch:
+        # --score-style spectrogram
+        # --score-spectro-profile-mode mean
+        # --score-spectro-motion-weight 1.2
+        # --score-spectro-profile-smooth 0.6
+        # --score-spectro-log-k 25
+        # --score-spectro-blur-y 5
+        # --score-spectro-noise-floor 10
+        # --score-spectro-grain 0.25
+        # --score-spectro-mask-feather 9
+        if not _cli_has("--score-style"):
+            args.score_style = "spectrogram"
+        if not _cli_has("--score-spectro-profile-mode"):
+            args.score_spectro_profile_mode = "mean"
+        if not _cli_has("--score-spectro-motion-weight"):
+            args.score_spectro_motion_weight = 1.2
+        if not _cli_has("--score-spectro-profile-smooth"):
+            args.score_spectro_profile_smooth = 0.6
+        if not _cli_has("--score-spectro-log-k"):
+            args.score_spectro_log_k = 25.0
+        if not _cli_has("--score-spectro-blur-y"):
+            args.score_spectro_blur_y = 5
+        if not _cli_has("--score-spectro-noise-floor"):
+            args.score_spectro_noise_floor = 10
+        if not _cli_has("--score-spectro-grain"):
+            args.score_spectro_grain = 0.25
+        if not _cli_has("--score-spectro-mask-feather"):
+            args.score_spectro_mask_feather = 9
     
     app = QApplication(sys.argv)
+    # Global typography (single font everywhere).
+    # Use only this font family to keep the interface consistent.
+    app.setFont(QFont("Menlo", 12))
     window = IMOLGraphicScoreWindow(args)
     window.show()
     sys.exit(app.exec())
