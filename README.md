@@ -83,24 +83,40 @@ For a high-level description of the concept and architecture, see:
     - Scrolling **graphic score** that accumulates the light field over time.
     - Optional **spectrogram-style rendering** (paper texture + energy-based drawing).
 
-### Run the CV Graphic Score
+## Quick start: CV Graphic Score (dual OSC by default)
+
+`IMOL_CV_GRAPHIC_SCORE_QT.py` now runs with a gallery-friendly default preset and OSC routing:
+
+- Lights (pattern controller): `/pattern <int>` → `127.0.0.1:9000`
+- Max (tracker stream): `/system/state`, `/state/N`, optional `/track/*` → `127.0.0.1:9001`
+- Default preset: `spectro_mean`
+
+Run:
 
 ```bash
-python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --camera-index 0
+python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py
 ```
 
-#### Spectrogram-style score rendering (energy + paper texture)
+### OSC overrides / escape hatches
 
-- **Profile mode** (continuous energy bands):
+- **Disable all OSC**:
+
+```bash
+python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --osc-out-disable
+```
+
+- **Disable `/track/A..F`** (keep `/system/state` + `/state/N`):
+
+```bash
+python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --osc-out-no-tracks
+```
+
+### Spectrogram-style score rendering
+
+Defaults are already tuned via the `spectro_mean` preset, but you can still override rendering:
 
 ```bash
 python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --score-style spectrogram --score-spectro-render-mode profile
-```
-
-- **Slice mode** (preserves more visible light shapes inside the spectrogram field):
-
-```bash
-python python-light-engine/IMOL_CV_GRAPHIC_SCORE_QT.py --score-style spectrogram --score-spectro-render-mode slice --score-spectro-slices-per-frame 3 --score-spectro-slice-step 6
 ```
 
 ### Repository note: large local media is ignored
@@ -110,4 +126,51 @@ The `audio/` folder (archives + processed audio) is **intentionally not tracked*
 ### Max patches
 
 `max_resynth/` is tracked in this repo and contains Max/MSP materials used in the spectral resynthesis part of the system.
+
+## Max: partials loader + tracker-to-notes
+
+### Partials file loader → `coll my_partials_bank`
+
+- **Loader**: `max_resynth/partials_bank_to_coll.js`
+  - **Outlet 0**: connect to `coll my_partials_bank` (sends `clear` + `store <key> <triplets...>`)
+  - **Outlet 1**: status/debug (safe to connect to UI/print)
+
+Core commands (sent to the `js` object):
+
+- `setfolder /Users/microhm/Desktop/01_Proyectos/IMOL/max_resynth`
+- `scan .txt`
+- `jump` (pick a random file from the scanned list and ingest it)
+- `setautonext 1` (after ingest finishes, automatically `jump` again)
+- `setautonextdelay 150` (ms)
+
+Status verbosity controls:
+
+- `setfilelist 0` (default: `files <count>` only)
+- `setfilelist 1` (also send full file paths list)
+- `setprogressinterval 120` (rate limit for progress updates)
+
+### Loader status UI (recommended): `dict.view`
+
+`jsui` can be fragile in Max; the reliable approach is a dict-based status panel.
+
+- **Bridge**: `max_resynth/partials_loader_status_to_dict.js`
+  - Connect loader outlet 1 → bridge inlet
+  - Bridge writes Dict named `partials_loader_status` and outputs a `bang` when updated
+
+Minimal patch:
+
+- `dict partials_loader_status`
+- `dict.view partials_loader_status`
+- Wire: `partials_loader_status_to_dict.js` outlet 0 → `dict.view partials_loader_status`
+
+### Tracker → Jitter "note" pulses (SpectralSynthesis)
+
+To use the OSC tracker stream (port 9001) to trigger momentary "notes" in the Jitter amplitude system:
+
+- **Script**: `max_resynth/osc_to_jitter_notes.js`
+  - Pulses the two `jit.bfg` controls used in `SpectralSynthesis.maxpat`:
+    - `offset $1 0. 0., bang`
+    - `scale $1, bang`
+  - Selects a playable bin using the current `jit.spill` (83 floats) list.
+  - Supports delta-triggering from a smooth `/system/state` float and randomized sustain/delay presets.
 

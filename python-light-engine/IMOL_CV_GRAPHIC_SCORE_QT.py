@@ -317,7 +317,8 @@ class AudioViewerWidget(QWidget):
         self.autoplay_cb.setStyleSheet("color: #9a9a9a; font-size: 11px;")
 
         self.osc_log_cb = QCheckBox("OSC log")
-        self.osc_log_cb.setChecked(True)
+        # Default OFF: printing OSC traffic can easily stall the GUI and/or Max debugging.
+        self.osc_log_cb.setChecked(False)
         self.osc_log_cb.setStyleSheet("color: #9a9a9a; font-size: 11px;")
 
         self.time_label = QLabel("0.00 / 0.00s")
@@ -358,15 +359,47 @@ class AudioViewerWidget(QWidget):
         self._cached_wave_box: Optional[tuple[int, int, int, int]] = None  # x0,y0,x1,y1 for playhead
         self._mono_font = QApplication.font()
 
-        # OSC client for pattern controller (set by parent window)
-        self.osc_client = None
+        # OSC clients (set by parent window)
+        # - osc_client_pattern: goes to the light pattern controller (/pattern)
+        # - osc_client_track: goes to Max (tracker-like addresses: /track/*, /system/state, /feat/*, etc.)
+        self.osc_client_pattern = None
+        self.osc_client_track = None
         self.osc_enabled = False
+        self.osc_format = "pattern"  # "pattern" | "tracker"
+        self.osc_send_features = False
+        self.osc_send_rate_hz = 20.0
+        self._last_osc_send_monotonic = 0.0
+        # Tracker stream throttles (separate from /track/* which is handled in IMOLGraphicScoreWindow)
+        # Rates: <= 0 disables sending that stream.
+        self.osc_tracker_system_rate_hz: float = 10.0
+        self.osc_tracker_vel_value_rate_hz: float = 10.0
+        self.osc_tracker_feat_rate_hz: float = 5.0
+        # Minimum deltas to avoid sending tiny changes (Max can choke on high packet rate)
+        self.osc_tracker_system_min_delta: float = 0.01
+        self.osc_tracker_vel_value_min_delta: float = 0.01
+        self.osc_tracker_feat_min_delta: float = 0.02
+        # Debounce the discrete /vel/<level> toggles (prevents rapid thrashing)
+        self.osc_tracker_vel_level_hold_s: float = 0.25
+        # Per-stream last-send timestamps
+        self._osc_last_send_system_monotonic: float = 0.0
+        self._osc_last_send_vel_value_monotonic: float = 0.0
+        self._osc_last_send_feat_monotonic: float = 0.0
+        # Last values (for min-delta)
+        self._osc_last_sent_system_state: Optional[float] = None
+        self._osc_last_sent_vel_value: Optional[float] = None
+        self._osc_last_sent_feats: dict[str, float] = {}
+        self._osc_last_vel_level_change_monotonic: float = 0.0
         self.pattern_max = 8
         self.pattern_count = 7
         self._last_trigger_t = 0.0
         self._silence_since: Optional[float] = None
         self._last_osc_print_monotonic = 0.0
         self._last_sent_pattern: Optional[int] = None
+        self._last_sent_vel_level: Optional[int] = None
+        self._last_state_on: Optional[int] = None
+        self._osc_state_value: float = 1.0
+        self._osc_state_target: float = 1.0
+        self._osc_state_lerp: float = 0.08
 
         # Playback tick timer
         self.play_timer = QTimer(self)
@@ -498,22 +531,68 @@ class AudioViewerWidget(QWidget):
         self.current_file = random_file
         self._load_audio_file(random_file)
 
-    def set_osc(self, enabled: bool, client, pattern_max: int = 8):
-        self.osc_enabled = bool(enabled) and client is not None
-        self.osc_client = client
+    def set_osc(
+        self,
+        enabled: bool,
+        client_pattern,
+        pattern_max: int = 8,
+        osc_format: str = "pattern",
+        send_features: bool = False,
+        send_rate_hz: float = 20.0,
+        client_track=None,
+        tracker_system_rate_hz: float = 10.0,
+        tracker_vel_value_rate_hz: float = 10.0,
+        tracker_feat_rate_hz: float = 5.0,
+        tracker_system_min_delta: float = 0.01,
+        tracker_vel_value_min_delta: float = 0.01,
+        tracker_feat_min_delta: float = 0.02,
+        tracker_vel_level_hold_s: float = 0.25,
+    ):
+        self.osc_enabled = bool(enabled) and client_pattern is not None
+        self.osc_client_pattern = client_pattern
+        self.osc_client_track = client_track
+        self.osc_format = str(osc_format or "pattern").strip().lower()
+        if self.osc_format not in ("pattern", "tracker"):
+            self.osc_format = "pattern"
+        self.osc_send_features = bool(send_features)
+        self.osc_send_rate_hz = float(max(1.0, send_rate_hz))
+        self._last_osc_send_monotonic = 0.0
+        # Tracker throttles (for /system/state, /vel/value, /feat/*)
+        self.osc_tracker_system_rate_hz = float(tracker_system_rate_hz)
+        self.osc_tracker_vel_value_rate_hz = float(tracker_vel_value_rate_hz)
+        self.osc_tracker_feat_rate_hz = float(tracker_feat_rate_hz)
+        self.osc_tracker_system_min_delta = float(max(0.0, tracker_system_min_delta))
+        self.osc_tracker_vel_value_min_delta = float(max(0.0, tracker_vel_value_min_delta))
+        self.osc_tracker_feat_min_delta = float(max(0.0, tracker_feat_min_delta))
+        self.osc_tracker_vel_level_hold_s = float(max(0.0, tracker_vel_level_hold_s))
+        # Reset stream clocks and last-values when changing OSC config
+        self._osc_last_send_system_monotonic = 0.0
+        self._osc_last_send_vel_value_monotonic = 0.0
+        self._osc_last_send_feat_monotonic = 0.0
+        self._osc_last_sent_system_state = None
+        self._osc_last_sent_vel_value = None
+        self._osc_last_sent_feats = {}
+        self._osc_last_vel_level_change_monotonic = 0.0
         self.pattern_max = int(max(1, pattern_max))
         self.pattern_count = min(self.pattern_max, 7)
         if self.osc_enabled:
             # Note: host/port are set in IMOLGraphicScoreWindow; client repr may include them.
-            print(f"[AUDIO/OSC] enabled client={type(client).__name__} pattern_max={self.pattern_max} pattern_count={self.pattern_count}")
+            track_name = type(self.osc_client_track).__name__ if self.osc_client_track is not None else "None"
+            print(f"[AUDIO/OSC] enabled pattern_client={type(client_pattern).__name__} track_client={track_name} format={self.osc_format} send_features={self.osc_send_features} rate_hz={self.osc_send_rate_hz} pattern_max={self.pattern_max} pattern_count={self.pattern_count}")
         else:
             if enabled:
                 print("[AUDIO/OSC] requested but disabled (no client). Check --osc-out-enable and python-osc.")
             else:
                 print("[AUDIO/OSC] disabled")
 
-    def _osc_send(self, address: str, value):
-        if not self.osc_enabled or self.osc_client is None:
+    def _osc_send(self, address: str, value, *, target: str = "pattern"):
+        if not self.osc_enabled:
+            return
+        if target == "track":
+            client = self.osc_client_track
+        else:
+            client = self.osc_client_pattern
+        if client is None:
             return
         # Terminal logging (rate-limited)
         if self.osc_log_cb.isChecked():
@@ -521,12 +600,129 @@ class AudioViewerWidget(QWidget):
             if (now - self._last_osc_print_monotonic) > 0.02:
                 self._last_osc_print_monotonic = now
                 pat = self.features.label_at(self.playhead_t) if self.features.is_valid else 0
-                print(f"[AUDIO/OSC] t={self.playhead_t:6.2f}s pattern={pat} -> {address} {value}")
+                print(f"[AUDIO/OSC] t={self.playhead_t:6.2f}s pattern={pat} target={target} -> {address} {value}")
         try:
-            self.osc_client.send_message(address, value)
+            client.send_message(address, value)
         except Exception as exc:
             if self.osc_log_cb.isChecked():
                 print(f"[AUDIO/OSC] send failed {address} {value}: {exc}")
+
+    def _feature_value_at(self, t_sec: float, arr: Optional[np.ndarray]) -> float:
+        """Nearest-sample lookup for feature arrays aligned to self.features.t."""
+        if arr is None or not self.features.is_valid or self.features.t.size == 0:
+            return 0.0
+        try:
+            idx = int(np.searchsorted(self.features.t, t_sec, side="right") - 1)
+            idx = int(np.clip(idx, 0, int(arr.shape[0] - 1)))
+            return float(arr[idx])
+        except Exception:
+            return 0.0
+
+    def _maybe_send_tracker_osc(self, pattern_n: int):
+        """
+        Tracker-style OSC format inspired by your motion tracker:
+        - /pattern <int>
+        - /state/N <0|1>
+        - /system/state <float> (smoothed continuous state value)
+        - optional normalized features: /feat/rms, /feat/onset, /feat/centroid, /feat/flatness, /feat/rolloff
+        - simple energy level: /vel/<0..4> <0|1> and /vel/value <0..1>
+        """
+        if not self.osc_enabled:
+            return
+        if self.osc_client_track is None:
+            return
+
+        now = time.monotonic()
+
+        # Smooth /system/state toward current pattern id
+        self._osc_state_target = float(pattern_n)
+        self._osc_state_value = float(self._osc_state_value + self._osc_state_lerp * (self._osc_state_target - self._osc_state_value))
+        # Tracker stream goes to Max (track target).
+        # Rate limit + min-delta to avoid spamming Max with tiny smooth steps.
+        if self.osc_tracker_system_rate_hz > 0.0:
+            min_dt_sys = 1.0 / float(max(0.01, self.osc_tracker_system_rate_hz))
+            if (now - self._osc_last_send_system_monotonic) >= min_dt_sys:
+                sys_val = float(self._osc_state_value)
+                sys_val = float(np.clip(sys_val, 0.0, 999.0))
+                sys_val = float(round(sys_val, 4))
+                last_sys = self._osc_last_sent_system_state
+                if last_sys is None or abs(sys_val - float(last_sys)) >= self.osc_tracker_system_min_delta:
+                    self._osc_send("/system/state", sys_val, target="track")
+                    self._osc_last_sent_system_state = sys_val
+                    self._osc_last_send_system_monotonic = now
+
+        # State toggles on pattern change
+        if self._last_state_on is None:
+            self._last_state_on = int(pattern_n)
+            self._osc_send(f"/state/{int(pattern_n)}", 1, target="track")
+        elif int(pattern_n) != int(self._last_state_on):
+            self._osc_send(f"/state/{int(self._last_state_on)}", 0, target="track")
+            self._osc_send(f"/state/{int(pattern_n)}", 1, target="track")
+            self._last_state_on = int(pattern_n)
+
+        # Feature-derived velocity level (0..4) from normalized RMS
+        rms01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.rms)], dtype=np.float32))[0]) if self.features.is_valid else 0.0
+        vel_level = int(np.clip(int(rms01 * 5.0), 0, 4))
+        if self._last_sent_vel_level is None:
+            self._last_sent_vel_level = vel_level
+            self._osc_send(f"/vel/{vel_level}", 1, target="track")
+            self._osc_last_vel_level_change_monotonic = now
+        elif vel_level != self._last_sent_vel_level:
+            # Debounce level switching
+            if (now - self._osc_last_vel_level_change_monotonic) >= float(self.osc_tracker_vel_level_hold_s):
+                self._osc_send(f"/vel/{int(self._last_sent_vel_level)}", 0, target="track")
+                self._osc_send(f"/vel/{vel_level}", 1, target="track")
+                self._last_sent_vel_level = vel_level
+                self._osc_last_vel_level_change_monotonic = now
+
+        # Optional continuous /vel/value (rate-limited + min-delta)
+        if self.osc_tracker_vel_value_rate_hz > 0.0:
+            min_dt_vel = 1.0 / float(max(0.01, self.osc_tracker_vel_value_rate_hz))
+            if (now - self._osc_last_send_vel_value_monotonic) >= min_dt_vel:
+                vv = float(np.clip(float(rms01), 0.0, 1.0))
+                vv = float(round(vv, 4))
+                last_vv = self._osc_last_sent_vel_value
+                if last_vv is None or abs(vv - float(last_vv)) >= self.osc_tracker_vel_value_min_delta:
+                    self._osc_send("/vel/value", vv, target="track")
+                    self._osc_last_sent_vel_value = vv
+                    self._osc_last_send_vel_value_monotonic = now
+
+        if not self.osc_send_features or not self.features.is_valid:
+            return
+        if self.osc_tracker_feat_rate_hz <= 0.0:
+            return
+
+        min_dt_feat = 1.0 / float(max(0.01, self.osc_tracker_feat_rate_hz))
+        if (now - self._osc_last_send_feat_monotonic) < min_dt_feat:
+            return
+
+        onset01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.onset)], dtype=np.float32))[0])
+        cent01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.centroid)], dtype=np.float32))[0])
+        flat01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.flatness)], dtype=np.float32))[0])
+        roll01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.rolloff)], dtype=np.float32))[0])
+
+        feat_map = {
+            "/feat/rms": float(round(float(np.clip(rms01, 0.0, 1.0)), 4)),
+            "/feat/onset": float(round(float(np.clip(onset01, 0.0, 1.0)), 4)),
+            "/feat/centroid": float(round(float(np.clip(cent01, 0.0, 1.0)), 4)),
+            "/feat/flatness": float(round(float(np.clip(flat01, 0.0, 1.0)), 4)),
+            "/feat/rolloff": float(round(float(np.clip(roll01, 0.0, 1.0)), 4)),
+        }
+        # Only send if at least one feature changed meaningfully.
+        any_change = False
+        for addr, val in feat_map.items():
+            last_val = self._osc_last_sent_feats.get(addr)
+            if last_val is None or abs(float(val) - float(last_val)) >= self.osc_tracker_feat_min_delta:
+                any_change = True
+                break
+        if not any_change:
+            self._osc_last_send_feat_monotonic = now
+            return
+
+        for addr, val in feat_map.items():
+            self._osc_send(addr, float(val), target="track")
+            self._osc_last_sent_feats[addr] = float(val)
+        self._osc_last_send_feat_monotonic = now
 
     def start_play(self):
         self.is_playing = True
@@ -679,7 +875,7 @@ class AudioViewerWidget(QWidget):
         # Update time label
         self.time_label.setText(f"{self.playhead_t:0.2f} / {self.features.duration:0.2f}s")
 
-        # Pattern detection from ML labels (only /pattern N is sent)
+        # Pattern detection from ML labels
         pattern_n = self.features.label_at(self.playhead_t)
 
         now = time.monotonic()
@@ -688,21 +884,24 @@ class AudioViewerWidget(QWidget):
             self._last_ui_redraw = now
             self.update_display()
 
-        if not self.osc_enabled or self.osc_client is None:
+        if not self.osc_enabled or self.osc_client_pattern is None:
             return
 
-        # Debounce: only send when pattern changes, with a minimum hold time
+        # Always keep legacy behavior: /pattern N on changes (debounced)
         min_hold = 0.40
         if self._last_sent_pattern is None:
             self._last_sent_pattern = pattern_n
             self._last_trigger_t = self.playhead_t
-            self._osc_send("/pattern", int(pattern_n))
-            return
-
-        if pattern_n != self._last_sent_pattern and (self.playhead_t - self._last_trigger_t) >= min_hold:
+            # Pattern always goes to the light controller target
+            self._osc_send("/pattern", int(pattern_n), target="pattern")
+        elif pattern_n != self._last_sent_pattern and (self.playhead_t - self._last_trigger_t) >= min_hold:
             self._last_sent_pattern = pattern_n
             self._last_trigger_t = self.playhead_t
-            self._osc_send("/pattern", int(pattern_n))
+            self._osc_send("/pattern", int(pattern_n), target="pattern")
+
+        # Optional tracker-style format (continuous + richer addresses)
+        if self.osc_format == "tracker":
+            self._maybe_send_tracker_osc(int(pattern_n))
     
     def update_display(self):
         """Render the audio viewer panel (cached to keep playback smooth)."""
@@ -1732,17 +1931,38 @@ class IMOLGraphicScoreWindow(QMainWindow):
         # Temporal tracking for light refractions
         self.detection_history = deque(maxlen=10)  # Last 10 frames
         self.stable_detections = {}  # Track static detections to filter them out
+
+        # OSC tracker-style /track/A..F state (CV-driven)
+        self._track_letters = list("ABCDEF")
+        self._track_prev_centers: list[tuple[float, float]] = [(0.0, 0.0) for _ in range(6)]
+        self._track_prev_boxes: list[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0) for _ in range(6)]
+        self._track_last_sent: list[tuple[float, float, float, float, float, float, float, float]] = [
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) for _ in range(6)
+        ]
+        self._track_last_send_monotonic: float = 0.0
         
         # Calculate panel dimensions
         self.panel_width = args.window_width // 2
 
         # OSC client for pattern controller (must exist before build_ui() wiring)
         self.osc_client = None
-        if OSC_AVAILABLE and args.osc_out_enable:
+        self.osc_track_client = None
+        if OSC_AVAILABLE and bool(getattr(args, "osc_out_enable", False)):
             try:
                 self.osc_client = SimpleUDPClient(args.osc_out_host, int(args.osc_out_port))
             except Exception:
                 self.osc_client = None
+
+        # Optional separate OSC destination for tracker streams (Max)
+        try:
+            if OSC_AVAILABLE and bool(getattr(args, "osc_out_enable", False)) and str(getattr(args, "osc_out_format", "pattern")).strip().lower() == "tracker":
+                host_t = str(getattr(args, "osc_track_host", "127.0.0.1"))
+                port_t = int(getattr(args, "osc_track_port", 9001))
+                # In tracker format we may always send lightweight /system/state + /vel/*,
+                # even if the user disables /track/* and /feat/*, so create the track client.
+                self.osc_track_client = SimpleUDPClient(host_t, port_t)
+        except Exception:
+            self.osc_track_client = None
 
         # Build UI
         self.build_ui()
@@ -1881,8 +2101,19 @@ class IMOLGraphicScoreWindow(QMainWindow):
         self.audio_viewer.load_button.clicked.connect(self.audio_viewer.select_folder)
         self.audio_viewer.set_osc(
             enabled=bool(self.args.osc_out_enable),
-            client=self.osc_client,
+            client_pattern=self.osc_client,
             pattern_max=int(self.args.osc_pattern_max),
+            osc_format=str(getattr(self.args, "osc_out_format", "pattern")),
+            send_features=bool(getattr(self.args, "osc_out_send_features", False)),
+            send_rate_hz=float(getattr(self.args, "osc_out_rate_hz", 20.0)),
+            client_track=self.osc_track_client,
+            tracker_system_rate_hz=float(getattr(self.args, "osc_tracker_system_rate_hz", 10.0)),
+            tracker_vel_value_rate_hz=float(getattr(self.args, "osc_tracker_vel_value_rate_hz", 10.0)),
+            tracker_feat_rate_hz=float(getattr(self.args, "osc_tracker_feat_rate_hz", 5.0)),
+            tracker_system_min_delta=float(getattr(self.args, "osc_tracker_system_min_delta", 0.01)),
+            tracker_vel_value_min_delta=float(getattr(self.args, "osc_tracker_vel_value_min_delta", 0.01)),
+            tracker_feat_min_delta=float(getattr(self.args, "osc_tracker_feat_min_delta", 0.02)),
+            tracker_vel_level_hold_s=float(getattr(self.args, "osc_tracker_vel_level_hold_s", 0.25)),
         )
         
         top_row.addWidget(cv_container)
@@ -2299,6 +2530,9 @@ class IMOLGraphicScoreWindow(QMainWindow):
         # Use ALL-bright-regions detection method (not background subtraction)
         # This captures the complete light field, not just moving lights
         geometry = self.detect_all_bright_regions(frame, inverted_gray)
+
+        # Optional: send CV-driven /track/A..F in tracker format (for Max patches that expect it)
+        self._maybe_send_cv_tracks(geometry.get("detections", []), frame.shape[1], frame.shape[0])
         
         # Use adjusted inverted image as background
         cv_vis = cv2.cvtColor(geometry['adjusted_inverted'], cv2.COLOR_GRAY2BGR)
@@ -2359,6 +2593,95 @@ class IMOLGraphicScoreWindow(QMainWindow):
         # Update graphic score with the actual light shapes from the adjusted frame
         # Pass the inverted image where light appears dark - the score will flip it
         self.score_widget.update_score_from_frame(geometry['adjusted_inverted'], geometry.get('detections'))
+
+    def _maybe_send_cv_tracks(self, detections: list, frame_w: int, frame_h: int):
+        """
+        Send motion-tracker-compatible OSC:
+        - /track/A .. /track/F
+          payload: [i, xNorm, yNorm, wNorm, hNorm, areaNorm, vxNorm, vyNorm]
+          where vx/vy are per-frame center deltas normalized to 0..1 range.
+        """
+        if self.osc_track_client is None:
+            return
+        if not bool(getattr(self.args, "osc_out_enable", False)):
+            return
+        if str(getattr(self.args, "osc_out_format", "pattern")).strip().lower() != "tracker":
+            return
+        if not bool(getattr(self.args, "osc_out_send_tracks", False)):
+            return
+
+        # Rate limit (separate from /pattern)
+        rate_hz = float(getattr(self.args, "osc_track_rate_hz", getattr(self.args, "osc_out_rate_hz", 20.0)))
+        rate_hz = float(max(0.5, rate_hz))
+        now = time.monotonic()
+        if (now - self._track_last_send_monotonic) < (1.0 / rate_hz):
+            return
+        self._track_last_send_monotonic = now
+
+        if frame_w <= 0 or frame_h <= 0:
+            return
+
+        # Sort detections by area descending
+        dets = []
+        for d in detections or []:
+            if not isinstance(d, dict):
+                continue
+            bbox = d.get("bbox")
+            if not bbox or len(bbox) != 4:
+                continue
+            x, y, w, h = bbox
+            if w <= 0 or h <= 0:
+                continue
+            area = float(d.get("area", float(w * h)))
+            cx, cy = d.get("center", (x + w // 2, y + h // 2))
+            dets.append((area, float(x), float(y), float(w), float(h), float(cx), float(cy)))
+        dets.sort(key=lambda t: t[0], reverse=True)
+
+        track_n = int(getattr(self.args, "osc_out_track_count", 6))
+        track_n = int(max(1, min(6, track_n)))
+        send_empty = bool(getattr(self.args, "osc_track_send_empty", False))
+        min_delta = float(getattr(self.args, "osc_track_min_delta", 0.003))
+        min_delta = float(max(0.0, min_delta))
+
+        # Send fixed A..F slots
+        for i in range(track_n):
+            letter = self._track_letters[i]
+            if i < len(dets):
+                area, x, y, w, h, cx, cy = dets[i]
+                xN = float(np.clip(x / float(frame_w), 0.0, 1.0))
+                yN = float(np.clip(y / float(frame_h), 0.0, 1.0))
+                wN = float(np.clip(w / float(frame_w), 0.0, 1.0))
+                hN = float(np.clip(h / float(frame_h), 0.0, 1.0))
+                aN = float(np.clip((w * h) / float(frame_w * frame_h), 0.0, 1.0))
+
+                prev_cx, prev_cy = self._track_prev_centers[i]
+                vxN = float(np.clip((cx - prev_cx) / float(frame_w), -1.0, 1.0))
+                vyN = float(np.clip((cy - prev_cy) / float(frame_h), -1.0, 1.0))
+
+                self._track_prev_centers[i] = (cx, cy)
+                self._track_prev_boxes[i] = (x, y, w, h)
+                payload = [int(i), xN, yN, wN, hN, aN, vxN, vyN]
+            else:
+                if not send_empty:
+                    continue
+                # No detection -> zeros
+                self._track_prev_centers[i] = (0.0, 0.0)
+                self._track_prev_boxes[i] = (0.0, 0.0, 0.0, 0.0)
+                payload = [int(i), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+            # Skip sending if payload hasn't changed much (reduces Max load)
+            last = self._track_last_sent[i]
+            cur = (float(payload[0]), float(payload[1]), float(payload[2]), float(payload[3]), float(payload[4]), float(payload[5]), float(payload[6]), float(payload[7]))
+            dsum = abs(cur[1] - last[1]) + abs(cur[2] - last[2]) + abs(cur[3] - last[3]) + abs(cur[4] - last[4]) + abs(cur[5] - last[5]) + abs(cur[6] - last[6]) + abs(cur[7] - last[7])
+            if dsum < min_delta:
+                continue
+            self._track_last_sent[i] = cur
+
+            try:
+                self.osc_track_client.send_message(f"/track/{letter}", payload)
+            except Exception:
+                # keep silent; audio panel already has OSC logging if desired
+                pass
     
     def closeEvent(self, event):
         """Clean up on close."""
@@ -2374,7 +2697,8 @@ def main():
     parser.add_argument(
         "--preset",
         type=str,
-        default="",
+        # Default to your current preferred gallery launch (no flags).
+        default="spectro_mean",
         help="Apply a preset of visual/score parameters (e.g. 'spectro_mean').",
     )
     parser.add_argument("--camera-index", type=int, default=0,
@@ -2393,14 +2717,56 @@ def main():
                        help="Background learning frames (default: 120)")
 
     # OSC output (to IMOL_PATTERN_CONTROLLER_QT)
-    parser.add_argument("--osc-out-enable", action="store_true",
-                        help="Enable OSC output for pattern control")
+    # Default ON (for gallery usage). Use --osc-out-disable to turn it off.
+    parser.add_argument("--osc-out-enable", action="store_true", default=True,
+                        help="(Default: enabled) Enable OSC output for pattern control")
+    parser.add_argument("--osc-out-disable", action="store_true",
+                        help="Disable OSC output (overrides --osc-out-enable)")
     parser.add_argument("--osc-out-host", type=str, default="127.0.0.1",
                         help="OSC destination host (default: 127.0.0.1)")
     parser.add_argument("--osc-out-port", type=int, default=9000,
                         help="OSC destination port (default: 9000)")
     parser.add_argument("--osc-pattern-max", type=int, default=8,
                         help="Max pattern index to target for /pattern mapping (default: 8)")
+    parser.add_argument("--osc-out-format", type=str, default="tracker",
+                        help="OSC format: pattern | tracker (default: tracker)")
+    parser.add_argument("--osc-out-send-features", action="store_true",
+                        help="In tracker format, also send normalized features under /feat/*")
+    parser.add_argument("--osc-out-rate-hz", type=float, default=20.0,
+                        help="OSC send rate limit in Hz for tracker format (default: 20.0)")
+    # Default ON (for your Max patch). Use --osc-out-no-tracks to turn it off.
+    parser.add_argument("--osc-out-send-tracks", action="store_true", default=True,
+                        help="(Default: enabled) In tracker format, also send /track/A..F from CV detections")
+    parser.add_argument("--osc-out-no-tracks", action="store_true",
+                        help="Disable sending /track/A..F (overrides --osc-out-send-tracks)")
+    parser.add_argument("--osc-out-track-count", type=int, default=6,
+                        help="How many /track/* slots to send (1..6, default: 6)")
+    parser.add_argument("--osc-track-host", type=str, default="127.0.0.1",
+                        help="Tracker OSC destination host for Max (default: 127.0.0.1)")
+    parser.add_argument("--osc-track-port", type=int, default=9001,
+                        help="Tracker OSC destination port for Max (default: 9001)")
+    parser.add_argument("--osc-track-rate-hz", type=float, default=6.0,
+                        help="Rate limit for /track/* messages in Hz (default: 6.0)")
+    parser.add_argument("--osc-track-min-delta", type=float, default=0.01,
+                        help="Minimum total delta (x,y,w,h,area,vx,vy) to send a /track/* update (default: 0.01)")
+    parser.add_argument("--osc-track-send-empty", action="store_true",
+                        help="If set, also send zeroed /track/* messages when fewer detections than slots")
+
+    # Tracker stream throttles for Max friendliness (applies to /system/state, /vel/value, /feat/*)
+    parser.add_argument("--osc-tracker-system-rate-hz", type=float, default=5.0,
+                        help="Rate limit for /system/state in Hz (<=0 disables; default: 5.0)")
+    parser.add_argument("--osc-tracker-system-min-delta", type=float, default=0.02,
+                        help="Min delta to send /system/state updates (default: 0.02)")
+    parser.add_argument("--osc-tracker-vel-value-rate-hz", type=float, default=5.0,
+                        help="Rate limit for /vel/value in Hz (<=0 disables; default: 5.0)")
+    parser.add_argument("--osc-tracker-vel-value-min-delta", type=float, default=0.02,
+                        help="Min delta to send /vel/value updates (default: 0.02)")
+    parser.add_argument("--osc-tracker-vel-level-hold-s", type=float, default=0.25,
+                        help="Debounce hold time in seconds for /vel/<level> toggles (default: 0.25)")
+    parser.add_argument("--osc-tracker-feat-rate-hz", type=float, default=0.0,
+                        help="Rate limit for /feat/* messages in Hz (<=0 disables; default: 0.0)")
+    parser.add_argument("--osc-tracker-feat-min-delta", type=float, default=0.02,
+                        help="Min delta to send /feat/* messages (default: 0.02)")
 
     # --- Graphic score aesthetics (rendering only) ---
     parser.add_argument("--score-decay", type=float, default=1.0,
@@ -2451,6 +2817,19 @@ def main():
                        help="In spectrogram slice mode, x-step between consecutive slices (default: 1)")
     
     args = parser.parse_args()
+
+    # ---------------------- Default gallery OSC wiring (no flags) ----------------------
+    # Keep backwards compatibility with prior CLI flags, but allow "disable" overrides.
+    if bool(getattr(args, "osc_out_disable", False)):
+        args.osc_out_enable = False
+    else:
+        # argparse store_true with default=True makes this always True unless disabled above.
+        args.osc_out_enable = bool(getattr(args, "osc_out_enable", True))
+
+    if bool(getattr(args, "osc_out_no_tracks", False)):
+        args.osc_out_send_tracks = False
+    else:
+        args.osc_out_send_tracks = bool(getattr(args, "osc_out_send_tracks", True))
 
     # ---------------------- Presets (avoid long CLI runs) ----------------------
     # Apply only if the user didn't explicitly pass the relevant flags.
