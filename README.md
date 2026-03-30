@@ -3,7 +3,7 @@
 ![An Instrument Made of Light -- installation view](img/imol_hero.jpg)
 
 Light-based instrument and graphic score by **Interspecifics**
-A/V Installation -- 2025
+A/V Installation -- 2026
 
 [Watch the video](https://vimeo.com/1170260167)
 
@@ -377,4 +377,4 @@ osascript -e 'quit app "Max"'
 
 ## License
 
-(c) Interspecifics, 2025.
+(c) Interspecifics, 2026.
