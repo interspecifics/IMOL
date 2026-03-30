@@ -9,13 +9,15 @@ A/V Installation -- 2025
 
 ---
 
-## Overview
+## Concept
 
-**An Instrument Made of Light** is a spatialized audio-visual installation that uses recordings of global protests as the raw material for a light-based instrument.
+In this new project, Interspecifics shift away from the microscopic and biophysical phenomena that have shaped much of their practice. Instead, they turn their attention to the human scale and to the ways in which collective bodies organise themselves. They observe movements that resemble the behavior of a swarm, propelled by a shared need to respond to global urgencies affecting communities around the world.
 
-Audio fragments from marches and demonstrations are retrieved from open archives (Amnesty International, Cities and Memory, among others). Through spectral analysis, machine learning, DMX-controlled lighting, and computer vision, these recordings are transformed into a luminous graphic score that continuously reconfigures both light and sound.
+The resonant material in *An Instrument Made of Light* comes from audio recordings of marches and demonstrations collected in different countries. The collective voice -- the vibrating social body that emerges from political urgency -- becomes the source material for constructing a kinetic light-driven sound installation.
 
-The system creates an indirect feedback loop through the physical space: audio analysis drives light patterns, a camera reads the resulting light field as a graphic score, and those CV-derived states feed back into Max/MSP to shape spectral processing -- closing the circuit through the room itself.
+From these recordings, Interspecifics create a new sound: a contemporary mantra in which the energy of global protest is transformed into a luminous and sonic gesture that rearticulates the energy of protest. An automated system selects audio files from open archives such as Amnesty International, Cities and Memory, and other collections of protest recordings. When a fragment is chosen, an instrumental process of transformation begins. Through spectral analysis, the system translates the characteristics of the audio into a luminous score performed by an array of moving spotlights, motors, crystals, and refractors. This choreography of light recomposes the original material in real time, unfolding before the audience as a visual organism. The sound is then resynthesised and performed live through a quadraphonic setup. Light and audio thus operate together as a unified performative structure.
+
+The work proposes an expanded form of listening that centers protest as an energetic field -- an instrument of light in which collective memory becomes vibrating energy, continually activated and reimagined.
 
 ---
 
