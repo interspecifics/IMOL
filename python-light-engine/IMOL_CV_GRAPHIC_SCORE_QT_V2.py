@@ -1,14 +1,22 @@
 """
-IMOL_CV_GRAPHIC_SCORE_QT
-------------------------
+IMOL_CV_GRAPHIC_SCORE_QT_V2
+----------------------------
 
-Qt-based computer vision graphic score system for IMOL.
+Qt-based computer vision graphic score system for IMOL (Version 2).
+
+**NEW IN V2:**
+- CV-Driven Machine Learning States (1-14) using MiniBatchKMeans
+- Adaptive OSC Transmission Modes (A/B/C) based on activity level
+- States sent to Max are learned from CV patterns, not audio
+- Audio continues to drive Python light controller
+- Model persistence for continuous learning across sessions
 
 Features:
 - CV process with image controls (contrast, brightness, gamma)
 - Audio file viewer with waveform and spectral analysis
 - Light pattern detection with bounding boxes and centroids
 - Punching-card style scrolling graphic score (partiture)
+- Intelligent OSC: static/smooth/dynamic modes based on activity
 
 Uses PySide6 for GUI and OpenCV for computer vision processing.
 """
@@ -49,6 +57,10 @@ from PySide6.QtWidgets import (
 # Import our advanced geometry analyzer
 from light_geometry_analyzer import LightGeometryAnalyzer, GeometricFeatures
 from camera_roles import DEFAULT_ROLES_PATH, dhash_hex_from_bgr, probe_best_index_for_role, save_role
+
+# V2: Import ML state analyzer and adaptive OSC controller
+from cv_state_analyzer import CvStateAnalyzer
+from adaptive_osc_controller import AdaptiveOscController
 
 # Audio analysis imports
 try:
@@ -499,6 +511,16 @@ class AudioViewerWidget(QWidget):
         self._osc_stateB_target: float = 1.0
         self._osc_stateB_last_update_monotonic: float = 0.0
 
+        # V2: Adaptive OSC Controller (activity-driven transmission modes)
+        self.adaptive_osc: Optional[AdaptiveOscController] = None
+        self.cv_driven_state: int = 1  # Current CV state (1-14) from ML
+        self.cv_driven_activity: float = 0.0  # Current activity level (0-1)
+        
+        # V2: CV state continuous sender (independent of audio playback)
+        self.cv_state_sender_timer = QTimer(self)
+        self.cv_state_sender_timer.timeout.connect(self._send_cv_states_continuously)
+        self.cv_state_sender_timer.start(100)  # 10 Hz base rate
+
         # ----------------------- Slow "set" state (meta layer) -----------------------
         # A second, slower 7-state stream that selects *pattern sets* in the light controller.
         # Goal: avoid fast thrashing, distribute sets across time, and keep memory across tracks.
@@ -912,6 +934,94 @@ class AudioViewerWidget(QWidget):
             else:
                 print("[AUDIO/OSC] disabled")
 
+    def update_cv_state(self, cv_state: int, activity_level: float) -> None:
+        """
+        V2: Update CV-driven state and activity level from the worker thread.
+        This is called whenever the CV analyzer emits new state + activity.
+        
+        Args:
+            cv_state: ML-learned state (1-14) from CV patterns
+            activity_level: normalized activity (0-1) for adaptive OSC modes
+        """
+        self.cv_driven_state = int(cv_state)
+        self.cv_driven_activity = float(activity_level)
+        
+        # Update adaptive OSC controller if initialized
+        if self.adaptive_osc is not None:
+            self.adaptive_osc.update_activity(activity_level)
+    
+    def _send_cv_states_continuously(self) -> None:
+        """
+        V2: Continuously send CV-driven states to Max, independent of audio playback.
+        Runs at 10 Hz but adaptive controller throttles actual sends based on activity.
+        """
+        if not self.osc_enabled:
+            return
+        if self.osc_track_sender is None and self.osc_client_track is None:
+            return
+        
+        now = time.monotonic()
+        
+        # Get adaptive OSC parameters
+        if self.adaptive_osc is not None:
+            params = self.adaptive_osc.get_params()
+            system_rate = params['system_state_rate_hz']
+            stateB_rate = params['stateB_rate_hz']
+            stateB_tau = params['stateB_tau_s']
+        else:
+            system_rate = self.osc_tracker_system_rate_hz
+            stateB_rate = self.osc_tracker_systemB_rate_hz
+            stateB_tau = self.osc_tracker_systemB_tau_s
+        
+        # Smooth /system/state toward CV state
+        cv_state_target = float(self.cv_driven_state)
+        self._osc_state_target = cv_state_target
+        self._osc_state_value = float(self._osc_state_value + self._osc_state_lerp * (self._osc_state_target - self._osc_state_value))
+        
+        # Send /system/state with adaptive rate
+        if system_rate > 0.0:
+            min_dt_sys = 1.0 / float(max(0.01, system_rate))
+            if (now - self._osc_last_send_system_monotonic) >= min_dt_sys:
+                sys_val = float(self._osc_state_value)
+                sys_val = float(np.clip(sys_val, 0.0, 999.0))
+                sys_val = float(round(sys_val, 4))
+                self._osc_send("/system/state", sys_val, target="track")
+                self._osc_last_sent_system_state = sys_val
+                self._osc_last_send_system_monotonic = now
+        
+        # Slow /system/stateB with adaptive tau
+        if self.osc_tracker_systemB_enabled:
+            self._osc_stateB_target = cv_state_target
+            if self._osc_stateB_last_update_monotonic <= 0.0:
+                self._osc_stateB_value = float(self._osc_stateB_target)
+                self._osc_stateB_last_update_monotonic = now
+            else:
+                dt = float(max(0.0, now - float(self._osc_stateB_last_update_monotonic)))
+                self._osc_stateB_last_update_monotonic = now
+                tau = float(max(0.001, stateB_tau))
+                alpha = float(1.0 - math.exp(-dt / tau)) if dt > 0.0 else 0.0
+                self._osc_stateB_value = float(self._osc_stateB_value + alpha * (self._osc_stateB_target - self._osc_stateB_value))
+            
+            if stateB_rate > 0.0:
+                min_dt_sysB = 1.0 / float(max(0.01, stateB_rate))
+                if (now - self._osc_last_send_systemB_monotonic) >= min_dt_sysB:
+                    sysB_val = float(self._osc_stateB_value)
+                    sysB_val = float(np.clip(sysB_val, 0.0, 999.0))
+                    sysB_val = float(round(sysB_val, 4))
+                    self._osc_send("/system/stateB", sysB_val, target="track")
+                    self._osc_last_sent_systemB_state = sysB_val
+                    self._osc_last_send_systemB_monotonic = now
+        
+        # State toggles on CV state change
+        cv_state_int = int(self.cv_driven_state)
+        if self._last_state_on is None:
+            self._last_state_on = cv_state_int
+            self._osc_send(f"/state/{cv_state_int}", 1, target="track")
+        elif cv_state_int != int(self._last_state_on):
+            self._osc_send(f"/state/{int(self._last_state_on)}", 0, target="track")
+            self._osc_send(f"/state/{cv_state_int}", 1, target="track")
+            self._last_state_on = cv_state_int
+
     def _osc_send(self, address: str, value, *, target: str = "pattern"):
         if not self.osc_enabled:
             return
@@ -950,13 +1060,14 @@ class AudioViewerWidget(QWidget):
 
     def _maybe_send_tracker_osc(self, pattern_n: int):
         """
-        Tracker-style OSC format inspired by your motion tracker:
-        - /pattern <int>
-        - /state/N <0|1>
-        - /system/state <float> (smoothed continuous state value)
-        - /system/stateB <float> (same target as /system/state, but much slower glide to avoid jumps)
-        - optional normalized features: /feat/rms, /feat/onset, /feat/centroid, /feat/flatness, /feat/rolloff
-        - simple energy level: /vel/<0..4> <0|1> and /vel/value <0..1>
+        V2: Audio-derived OSC messages only (vel, feat).
+        
+        CV states (/system/state, /system/stateB, /state/N) are sent continuously
+        via _send_cv_states_continuously() timer, NOT here!
+        
+        This method sends:
+        - /vel/* (audio RMS-based energy levels)
+        - /feat/* (optional audio features)
         """
         if not self.osc_enabled:
             return
@@ -964,56 +1075,20 @@ class AudioViewerWidget(QWidget):
             return
 
         now = time.monotonic()
-
-        # Smooth /system/state toward current pattern id
-        self._osc_state_target = float(pattern_n)
-        self._osc_state_value = float(self._osc_state_value + self._osc_state_lerp * (self._osc_state_target - self._osc_state_value))
-        # Tracker stream goes to Max (track target).
-        # IMPORTANT: send immediately (via _osc_send) instead of accumulating/bundling.
-        # This matches the proven Max-side expectations: individual OSC messages.
-        if self.osc_tracker_system_rate_hz > 0.0:
-            min_dt_sys = 1.0 / float(max(0.01, self.osc_tracker_system_rate_hz))
-            if (now - self._osc_last_send_system_monotonic) >= min_dt_sys:
-                sys_val = float(self._osc_state_value)
-                sys_val = float(np.clip(sys_val, 0.0, 999.0))
-                sys_val = float(round(sys_val, 4))
-                self._osc_send("/system/state", sys_val, target="track")
-                self._osc_last_sent_system_state = sys_val
-                self._osc_last_send_system_monotonic = now
-
-        # Slow /system/stateB: same target, slower time-constant (slew) to avoid jumps in Max.
-        if self.osc_tracker_systemB_enabled:
-            self._osc_stateB_target = float(pattern_n)
-            if self._osc_stateB_last_update_monotonic <= 0.0:
-                # First run: start at target to avoid a long catch-up ramp on startup.
-                self._osc_stateB_value = float(self._osc_stateB_target)
-                self._osc_stateB_last_update_monotonic = now
-            else:
-                dt = float(max(0.0, now - float(self._osc_stateB_last_update_monotonic)))
-                self._osc_stateB_last_update_monotonic = now
-                tau = float(max(0.001, self.osc_tracker_systemB_tau_s))
-                # Exponential smoothing with time-constant tau (seconds).
-                alpha = float(1.0 - math.exp(-dt / tau)) if dt > 0.0 else 0.0
-                self._osc_stateB_value = float(self._osc_stateB_value + alpha * (self._osc_stateB_target - self._osc_stateB_value))
-
-            if self.osc_tracker_systemB_rate_hz > 0.0:
-                min_dt_sysB = 1.0 / float(max(0.01, self.osc_tracker_systemB_rate_hz))
-                if (now - self._osc_last_send_systemB_monotonic) >= min_dt_sysB:
-                    sysB_val = float(self._osc_stateB_value)
-                    sysB_val = float(np.clip(sysB_val, 0.0, 999.0))
-                    sysB_val = float(round(sysB_val, 4))
-                    self._osc_send("/system/stateB", sysB_val, target="track")
-                    self._osc_last_sent_systemB_state = sysB_val
-                    self._osc_last_send_systemB_monotonic = now
-
-        # State toggles on pattern change
-        if self._last_state_on is None:
-            self._last_state_on = int(pattern_n)
-            self._osc_send(f"/state/{int(pattern_n)}", 1, target="track")
-        elif int(pattern_n) != int(self._last_state_on):
-            self._osc_send(f"/state/{int(self._last_state_on)}", 0, target="track")
-            self._osc_send(f"/state/{int(pattern_n)}", 1, target="track")
-            self._last_state_on = int(pattern_n)
+        
+        # V2: Get adaptive OSC parameters based on current activity
+        if self.adaptive_osc is not None:
+            params = self.adaptive_osc.get_params()
+            vel_rate = params['vel_value_rate_hz']
+            feat_rate = params['feat_rate_hz']
+            vel_min_delta = params['vel_min_delta']
+            feat_min_delta = params['feat_min_delta']
+        else:
+            # Fallback to static rates if adaptive controller not initialized
+            vel_rate = self.osc_tracker_vel_value_rate_hz
+            feat_rate = self.osc_tracker_feat_rate_hz
+            vel_min_delta = self.osc_tracker_vel_value_min_delta
+            feat_min_delta = self.osc_tracker_feat_min_delta
 
         # Feature-derived velocity level (0..4) from normalized RMS
         rms01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.rms)], dtype=np.float32))[0]) if self.features.is_valid else 0.0
@@ -1030,21 +1105,21 @@ class AudioViewerWidget(QWidget):
                 self._last_sent_vel_level = vel_level
                 self._osc_last_vel_level_change_monotonic = now
 
-        # Optional continuous /vel/value (rate-limited + min-delta)
-        if self.osc_tracker_vel_value_rate_hz > 0.0:
-            min_dt_vel = 1.0 / float(max(0.01, self.osc_tracker_vel_value_rate_hz))
+        # V2: Optional continuous /vel/value with adaptive rate
+        if vel_rate > 0.0:
+            min_dt_vel = 1.0 / float(max(0.01, vel_rate))
             if (now - self._osc_last_send_vel_value_monotonic) >= min_dt_vel:
                 vv = float(np.clip(float(rms01), 0.0, 1.0))
                 vv = float(round(vv, 4))
                 last_vv = self._osc_last_sent_vel_value
-                if last_vv is None or abs(vv - float(last_vv)) >= self.osc_tracker_vel_value_min_delta:
+                if last_vv is None or abs(vv - float(last_vv)) >= vel_min_delta:
                     self._osc_send("/vel/value", vv, target="track")
                     self._osc_last_sent_vel_value = vv
                     self._osc_last_send_vel_value_monotonic = now
 
-        # Optional /feat/* stream
-        if self.osc_send_features and self.features.is_valid and self.osc_tracker_feat_rate_hz > 0.0:
-            min_dt_feat = 1.0 / float(max(0.01, self.osc_tracker_feat_rate_hz))
+        # V2: Optional /feat/* stream with adaptive rate
+        if self.osc_send_features and self.features.is_valid and feat_rate > 0.0:
+            min_dt_feat = 1.0 / float(max(0.01, feat_rate))
             if (now - self._osc_last_send_feat_monotonic) >= min_dt_feat:
                 onset01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.onset)], dtype=np.float32))[0])
                 cent01 = float(_norm01(np.array([self._feature_value_at(self.playhead_t, self.features.centroid)], dtype=np.float32))[0])
@@ -1058,11 +1133,11 @@ class AudioViewerWidget(QWidget):
                     "/feat/flatness": float(round(float(np.clip(flat01, 0.0, 1.0)), 4)),
                     "/feat/rolloff": float(round(float(np.clip(roll01, 0.0, 1.0)), 4)),
                 }
-                # Only send if at least one feature changed meaningfully.
+                # V2: Only send if at least one feature changed meaningfully (adaptive min_delta).
                 any_change = False
                 for addr, val in feat_map.items():
                     last_val = self._osc_last_sent_feats.get(addr)
-                    if last_val is None or abs(float(val) - float(last_val)) >= self.osc_tracker_feat_min_delta:
+                    if last_val is None or abs(float(val) - float(last_val)) >= feat_min_delta:
                         any_change = True
                         break
                 # Even when features don't change, advance the feature clock (rate limiting).
@@ -1239,7 +1314,8 @@ class AudioViewerWidget(QWidget):
         # we should still send the Max tracker stream.
         if self.osc_client_pattern is not None:
             # Always keep legacy behavior: /pattern N on changes (debounced)
-            min_hold = 0.40
+            # Minimum 30 seconds between pattern changes to create stable light states
+            min_hold = 30.0
             if self._last_sent_pattern is None:
                 self._last_sent_pattern = pattern_n
                 self._last_trigger_t = self.playhead_t
@@ -1328,8 +1404,8 @@ class AudioViewerWidget(QWidget):
         # Collect text overlays to draw with Qt (single font everywhere).
         text_overlays: list[tuple[str, int, int, QColor, int]] = []
         # tuple: (text, x, y, color, point_size)
-        mono_color = QColor(210, 210, 210)
-        dim_color = QColor(160, 160, 160)
+        mono_color = QColor(140, 140, 140)  # Darker gray instead of 210
+        dim_color = QColor(100, 100, 100)   # Darker gray instead of 160
         
         if self.audio_data is None:
             # No audio loaded - centered message
@@ -2200,9 +2276,11 @@ class GraphicScoreWidget(QLabel):
                         self._add_halo_roi(dst_x, y0, y1)
                         continue
 
+                    # Reduce peak brightness for darker score
+                    peak = int(peak * 0.7)  # Scale down to ~70% brightness
                     # Stroke thickness depends slightly on brightness, capped for readability.
                     thickness = int(self.core_thickness)
-                    if peak >= 230:
+                    if peak >= 160:  # was 230
                         thickness = max(thickness, 2)
 
                     # Draw a continuous vertical stroke
@@ -2214,11 +2292,13 @@ class GraphicScoreWidget(QLabel):
                 # Original dot-based aesthetic
                 for y in active_idxs.tolist():
                     b = int(np.clip(col_brightness[y], 0, 255))
-                    if b > 230:
+                    # Reduced brightness for darker score (max ~180 instead of 255)
+                    b = int(b * 0.7)  # Scale down to ~70% brightness
+                    if b > 160:  # was 230
                         radius = 3
-                    elif b > 200:
+                    elif b > 140:  # was 200
                         radius = 2
-                    elif b > 170:
+                    elif b > 120:  # was 170
                         radius = 1
                     else:
                         radius = 0
@@ -2720,6 +2800,8 @@ class CvScoreWorker(QObject):
 
     frame_ready = Signal(object, object, object)  # cv_vis_bgr, overlays_data, score_vis_bgr
     status = Signal(str)
+    # V2: CV state + activity level (for adaptive OSC)
+    cv_state_ready = Signal(int, float, object)  # (state: 1-14, activity: 0-1, debug_info: dict)
 
     def __init__(self, *, args, panel_width: int, cv_display_height: int, score_height: int, osc_track_sender: Optional[OscTrackSender] = None):
         super().__init__()
@@ -2801,6 +2883,17 @@ class CvScoreWorker(QObject):
             spectro_slice_step=int(getattr(args, "score_spectro_slice_step", 1)),
         )
 
+        # V2: CV State Analyzer (ML-based state learning from CV patterns)
+        self.cv_state_analyzer = CvStateAnalyzer(
+            n_states=int(getattr(args, "cv_state_count", 14)),
+            frame_width=int(panel_width),
+            frame_height=int(cv_display_height),
+            model_path=Path(getattr(args, "cv_state_model", "cv_state_model.json")),
+            learning_rate=float(getattr(args, "cv_state_learning_rate", 0.1)),
+            smoothing_tau=float(getattr(args, "cv_state_smoothing_tau", 1.0)),
+            use_ml=bool(getattr(args, "cv_state_use_ml", True)),
+        )
+        
         # OSC sender for CV tracker streams (Max)
         self.osc_track_sender: Optional[OscTrackSender] = osc_track_sender
         self.osc_track_client = None
@@ -2994,6 +3087,13 @@ class CvScoreWorker(QObject):
         adjusted_inverted = self._apply_image_adjustments(inverted_gray)
 
         contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Limit processing to prevent freezing with too many contours
+        MAX_DETECTIONS = 50  # Process at most 50 detections
+        if len(contours) > MAX_DETECTIONS:
+            # Sort by area (largest first) and take only the top MAX_DETECTIONS
+            contours = sorted(contours, key=cv2.contourArea, reverse=True)[:MAX_DETECTIONS]
+        
         detections = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
@@ -3010,6 +3110,10 @@ class CvScoreWorker(QObject):
             else:
                 cx, cy = x + w // 2, y + h // 2
 
+            # Skip expensive mean intensity calculation if we already have enough detections
+            if len(detections) >= MAX_DETECTIONS:
+                break
+            
             mask_region = np.zeros(adjusted_original.shape, dtype=np.uint8)
             cv2.drawContours(mask_region, [cnt], -1, 255, -1)
             mean_intensity = cv2.mean(adjusted_original, mask=mask_region)[0]
@@ -3164,12 +3268,17 @@ class CvScoreWorker(QObject):
         if self._busy:
             return
         self._busy = True
+        tick_start = time.monotonic()
         try:
             if self._cap is None or not self._cap.isOpened():
                 self._maybe_reconnect("not opened")
                 return
 
             ret, frame = self._cap.read()
+            read_time = time.monotonic() - tick_start
+            if read_time > 0.5:
+                print(f"[WORKER] WARNING: camera read took {read_time:.2f}s (may cause freezing)")
+            
             if not ret or frame is None:
                 self._cam_fail_count += 1
                 if self._cam_fail_count >= 8:
@@ -3202,12 +3311,26 @@ class CvScoreWorker(QObject):
             inverted_gray = cv2.bitwise_not(gray)
             geometry = self._detect_all_bright_regions(frame, inverted_gray)
 
+            # V2: Analyze CV detections to get ML-based state (1-14) + activity level (0-1)
+            cv_state, activity_level, debug_info = self.cv_state_analyzer.analyze_frame(
+                detections=geometry.get("detections", []),
+                frame_width=frame.shape[1],
+                frame_height=frame.shape[0],
+            )
+            
+            # Emit state + activity for adaptive OSC (main window will handle)
+            self.cv_state_ready.emit(cv_state, activity_level, debug_info)
+
             self._maybe_send_cv_tracks(geometry.get("detections", []), frame.shape[1], frame.shape[0])
 
             cv_vis = cv2.cvtColor(geometry["adjusted_inverted"], cv2.COLOR_GRAY2BGR)
             active_count = 0
             stable_count = 0
-            for detection in geometry["detections"]:
+            
+            # Limit overlay drawing to prevent freezing (draw at most 40 boxes)
+            detections_to_draw = geometry["detections"][:40]
+            
+            for detection in detections_to_draw:
                 x, y, w, h = detection["bbox"]
                 cx, cy = detection["center"]
                 is_active = bool(detection.get("is_active", True))
@@ -3222,18 +3345,28 @@ class CvScoreWorker(QObject):
                 cv2.rectangle(cv_vis, (x, y), (x + w, y + h), color, thickness)
                 radius = max(3, min(int(detection["size"]) // 3, 12))
                 cv2.circle(cv_vis, (cx, cy), radius, color, -1)
-                cv2.circle(cv_vis, (cx, cy), radius + 2, (255, 255, 255), 1)
+                cv2.circle(cv_vis, (cx, cy), radius + 2, (140, 140, 140), 1)  # Darker gray outline
+            
+            # Count all detections (not just drawn ones)
+            for detection in geometry["detections"]:
+                if detection.get("is_active", True):
+                    active_count += 1
+                else:
+                    stable_count += 1
 
             # Parity with previous UI: this label was computed without feeding analyzer features,
             # so it often remains "initializing". We keep it as-is to avoid behavior changes.
             state_label = self.geometry_analyzer.get_temporal_state()
             num_detections = len(geometry["detections"])
-            # No background panel: render detection text directly on the camera image.
+            # V2: Add ML state and activity to overlay + tick time for freeze detection
+            total_time = time.monotonic() - tick_start
             overlays = [
-                (f"{state_label}", 12, 26, (230, 230, 230), 13),
-                (f"total={num_detections}", 12, 50, (200, 200, 200), 12),
-                (f"active={active_count}", 12, 72, (10, 132, 255), 12),
-                (f"stable={stable_count}", 12, 92, (200, 200, 200), 12),
+                (f"CV State: {cv_state}/14", 12, 26, (60, 160, 120), 13),      # Darker green
+                (f"Activity: {activity_level:.2f}", 12, 48, (160, 120, 60), 12),  # Darker orange
+                (f"total={num_detections}", 12, 70, (120, 120, 120), 12),     # Darker gray
+                (f"active={active_count}", 12, 92, (8, 90, 160), 12),         # Darker blue
+                (f"training={debug_info.get('training_frames', 0)}", 12, 112, (110, 110, 110), 10),  # Darker gray
+                (f"tick: {total_time*1000:.0f}ms", 12, 132, (90, 90, 90), 9),  # Darker gray
             ]
 
             score_vis = self.score_state.update_score_from_frame(geometry["adjusted_inverted"], geometry.get("detections"))
@@ -3470,6 +3603,13 @@ class IMOLGraphicScoreWindow(QMainWindow):
             tracker_vel_level_hold_s=float(getattr(self.args, "osc_tracker_vel_level_hold_s", 0.25)),
         )
         
+        # V2: Initialize Adaptive OSC Controller
+        self.audio_viewer.adaptive_osc = AdaptiveOscController(
+            mode_a_threshold=float(getattr(self.args, "osc_mode_a_threshold", 0.3)),
+            mode_c_threshold=float(getattr(self.args, "osc_mode_c_threshold", 0.7)),
+            transition_tau=float(getattr(self.args, "osc_mode_transition_tau", 3.0)),
+        )
+        
         top_row.addWidget(cv_container)
         top_row.addWidget(self.audio_viewer)
         
@@ -3538,8 +3678,22 @@ class IMOLGraphicScoreWindow(QMainWindow):
         # Worker -> UI frames
         self._cv_worker.frame_ready.connect(self._on_worker_frame_ready)
         self._cv_worker.status.connect(self._on_worker_status)
+        # V2: Connect CV state + activity signal to audio viewer
+        self._cv_worker.cv_state_ready.connect(self._on_cv_state_ready)
 
         self._cv_thread.start()
+
+    @Slot(int, float, object)
+    def _on_cv_state_ready(self, cv_state: int, activity: float, debug_info: dict) -> None:
+        """V2: Handle CV state + activity updates from worker."""
+        self.audio_viewer.update_cv_state(cv_state, activity)
+        # Log to terminal with detailed feature info for debugging
+        if (time.time() % 0.5) < 0.033:  # Every 0.5 seconds
+            mode = self.audio_viewer.adaptive_osc.get_params()['mode'] if self.audio_viewer.adaptive_osc else '?'
+            blob = debug_info.get('blob_count', 0)
+            vel = debug_info.get('mean_velocity', 0)
+            act = debug_info.get('activity_raw', 0)
+            print(f"[CV] state={cv_state:2d} | act={act:.3f} | mode={mode} | blob={blob:.2f} vel={vel:.2f} | train={debug_info.get('training_frames', 0)}")
 
     @Slot(str)
     def _on_worker_status(self, msg: str) -> None:
@@ -3962,6 +4116,13 @@ class IMOLGraphicScoreWindow(QMainWindow):
     
     def closeEvent(self, event):
         """Clean up on close."""
+        # V2: Save CV state model before exit
+        try:
+            if self._cv_worker is not None and hasattr(self._cv_worker, 'cv_state_analyzer'):
+                self._cv_worker.cv_state_analyzer.shutdown()
+        except Exception:
+            pass
+        
         try:
             if self._cv_worker is not None:
                 QTimer.singleShot(0, self._cv_worker.stop)
@@ -4014,6 +4175,12 @@ def main():
                        help="Window height (default: 1080)")
     parser.add_argument("--top-panel-height", type=int, default=580,
                        help="Height of top panels (default: 580)")
+    parser.add_argument("--display", type=int, default=-1,
+                       help="Display index to show window on (-1 = auto-detect largest, default: -1)")
+    parser.add_argument("--hide-cursor", action="store_true", default=True,
+                       help="(Default: enabled) Hide mouse cursor in fullscreen mode")
+    parser.add_argument("--show-cursor", dest="hide_cursor", action="store_false",
+                       help="Show mouse cursor in fullscreen mode")
     parser.add_argument("--bins", type=int, default=24,
                        help="Number of vertical bins (default: 24)")
     parser.add_argument("--fps", type=float, default=30.0,
@@ -4030,6 +4197,10 @@ def main():
                        help="Person detector refresh rate in Hz (default: 2.0)")
     parser.add_argument("--cv-people-pad-px", type=int, default=18,
                        help="Padding around person boxes in pixels (default: 18)")
+
+    # Audio folder auto-load
+    parser.add_argument("--audio-folder", type=str, default="",
+                       help="Auto-load audio files from this folder on startup (default: none)")
 
     # OSC output (to IMOL_PATTERN_CONTROLLER_QT)
     # Default ON (for gallery usage). Use --osc-out-disable to turn it off.
@@ -4141,6 +4312,28 @@ def main():
     parser.add_argument("--score-spectro-slice-step", type=int, default=1,
                        help="In spectrogram slice mode, x-step between consecutive slices (default: 1)")
     
+    # V2: CV State Machine Learning Arguments
+    parser.add_argument("--cv-state-count", type=int, default=14,
+                       help="Number of CV states to learn (default: 14)")
+    parser.add_argument("--cv-state-model", type=str, default="cv_state_model.json",
+                       help="Path to save/load learned CV state model (default: cv_state_model.json)")
+    parser.add_argument("--cv-state-learning-rate", type=float, default=0.1,
+                       help="Learning rate for MiniBatchKMeans (default: 0.1)")
+    parser.add_argument("--cv-state-smoothing-tau", type=float, default=1.0,
+                       help="Smoothing time constant for state transitions in seconds (default: 1.0)")
+    parser.add_argument("--cv-state-use-ml", action="store_true", default=True,
+                       help="(Default: enabled) Use MiniBatchKMeans ML for state learning")
+    parser.add_argument("--cv-state-use-rules", dest="cv_state_use_ml", action="store_false",
+                       help="Disable ML; use rule-based state assignment instead")
+    
+    # V2: Adaptive OSC Controller Arguments
+    parser.add_argument("--osc-mode-a-threshold", type=float, default=0.3,
+                       help="Activity threshold below which OSC enters Mode A (STATIC) (default: 0.3)")
+    parser.add_argument("--osc-mode-c-threshold", type=float, default=0.7,
+                       help="Activity threshold above which OSC enters Mode C (DYNAMIC) (default: 0.7)")
+    parser.add_argument("--osc-mode-transition-tau", type=float, default=3.0,
+                       help="Smoothing time constant for OSC mode transitions in seconds (default: 3.0)")
+    
     args = parser.parse_args()
 
     # ---------------------- Camera role calibration / auto selection ----------------------
@@ -4242,8 +4435,79 @@ def main():
     # Global typography (single font everywhere).
     # Use only this font family to keep the interface consistent.
     app.setFont(QFont("Menlo", 12))
+    
+    # Display selection: choose target screen
+    target_screen = None
+    screens = app.screens()
+    
+    if args.display >= 0 and args.display < len(screens):
+        # Explicit display index provided
+        target_screen = screens[args.display]
+        print(f"[DISPLAY] Using display {args.display}: {target_screen.name()}")
+    elif args.display == -1 and len(screens) > 1:
+        # Auto-detect: use largest screen (projector is typically larger)
+        target_screen = max(screens, key=lambda s: s.size().width() * s.size().height())
+        screen_idx = screens.index(target_screen)
+        print(f"[DISPLAY] Auto-detected largest display ({screen_idx}): {target_screen.name()} "
+              f"{target_screen.size().width()}x{target_screen.size().height()}")
+    elif len(screens) == 1:
+        target_screen = screens[0]
+        print(f"[DISPLAY] Using primary display: {target_screen.name()}")
+    else:
+        # Fallback to primary screen
+        target_screen = app.primaryScreen()
+        print(f"[DISPLAY] Using primary screen (fallback)")
+    
     window = IMOLGraphicScoreWindow(args)
+    
+    # Position window on target screen BEFORE going fullscreen
+    if target_screen:
+        # Ensure window handle exists before setting screen
+        window.create()
+        if window.windowHandle():
+            window.windowHandle().setScreen(target_screen)
+        # Move to screen's top-left corner before going fullscreen
+        geom = target_screen.geometry()
+        window.move(geom.x(), geom.y())
+    
+    # Hide cursor in fullscreen mode (gallery setup)
+    if args.hide_cursor:
+        window.setCursor(Qt.BlankCursor)
+        print("[DISPLAY] Mouse cursor hidden")
+    
+    # Show the window (this must happen before showFullScreen for proper positioning)
     window.show()
+    
+    # Now go fullscreen on the positioned screen
+    window.showFullScreen()
+    
+    # Auto-load audio folder if specified
+    if args.audio_folder:
+        from pathlib import Path
+        audio_path = Path(args.audio_folder)
+        if audio_path.exists() and audio_path.is_dir():
+            # Use QTimer to load after the event loop starts
+            from PySide6.QtCore import QTimer
+            def auto_load_audio():
+                window.audio_viewer.audio_folder = str(audio_path)
+                # Find all audio files in the folder
+                audio_extensions = ['.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac']
+                window.audio_viewer.audio_files = []
+                
+                for ext in audio_extensions:
+                    window.audio_viewer.audio_files.extend(audio_path.glob(f'*{ext}'))
+                    window.audio_viewer.audio_files.extend(audio_path.glob(f'*{ext.upper()}'))
+                
+                if window.audio_viewer.audio_files:
+                    print(f"[AUDIO] Auto-loaded {len(window.audio_viewer.audio_files)} files from {audio_path}")
+                    window.audio_viewer.load_random_audio()
+                else:
+                    print(f"[AUDIO] No audio files found in {audio_path}")
+            
+            QTimer.singleShot(500, auto_load_audio)
+        else:
+            print(f"[AUDIO] Warning: Audio folder not found or invalid: {args.audio_folder}")
+    
     sys.exit(app.exec())
 
 

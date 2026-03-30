@@ -9,4 +9,5 @@ librosa
 soundfile
 matplotlib
 cartopy
+scikit-learn
 

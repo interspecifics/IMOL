@@ -18,6 +18,12 @@ var g_lastSourcePath = "";
 var g_lastPartialsCount = -1;
 var g_fullLoaded = false;
 
+var g_windowEnable = 0;
+var g_windowStart = 0;
+var g_windowSize = 83;
+var g_windowPadHold = 1;
+var g_fullTriplets = {};
+
 // Folder playlist
 var g_folderPath = "";
 var g_folderPathResolved = "";
@@ -39,6 +45,70 @@ var g_emitFileList = 0;
 var g_autoNext = 0;
 var g_autoNextDelayMs = 150;
 var g_autoNextTask = null;
+
+var g_isIngesting = 0;
+var g_jumpMinIntervalMs = 250;
+var g_lastJumpMs = 0;
+
+// Auto-next behavior:
+// - "loaded": jump right after ingest completes (legacy behavior)
+// - "window_end": jump when nextwindow would go past the end of available points (autowindow use)
+// - "bank_end": jump when autobank reaches end-of-file (preferred for huge partialsCount)
+var g_autoNextMode = "bank_end";
+
+var g_lastMinPoints = 0;
+
+// Coll-text ingest acceleration (avoid rescanning huge files on every autobank step)
+var g_collCachePath = "";
+var g_collCacheSawPointType = 0;
+var g_collCacheBaseKey = 1;
+var g_collCacheOffsets = {}; // key(int) -> file position (byte offset at start of line)
+var g_collCacheMaxKeyIndexed = -1;
+var g_collCacheLastPos = 0;
+var g_collCacheMaxKeyOverall = -1; // estimated max key in file (for partialsCount)
+
+// Chunked coll writes: emitting huge "store" messages in one scheduler tick can freeze Max UI.
+var g_collFlushQueue = [];
+var g_collFlushTask = null;
+var g_collFlushBatch = 2; // messages per tick
+var g_collFlushMeta = null;
+
+// Auto-advance point windows (hands-free). Two modes:
+// - "osc": only advance when autowindowtick is received (drive from OSC/bang)
+// - "timer": advance periodically every g_autoWindowIntervalMs
+var g_autoWindow = 0;
+var g_autoWindowMode = "osc"; // "osc" | "timer"
+var g_autoWindowIntervalMs = 2500;
+var g_autoWindowTask = null;
+var g_autoWindowWaitingForLoad = 0;
+
+// Auto-advance banks (pages through many partials in a file by moving startPartial).
+// Use this when partialsCount is huge but each partial has only ~83 points.
+var g_autoBank = 0;
+var g_autoBankMode = "osc"; // "osc" | "timer"
+var g_autoBankIntervalMs = 2500;
+var g_autoBankTask = null;
+var g_autoBankWaitingForLoad = 0;
+
+// One-shot "make it work" defaults (so you don't need many setup messages)
+var g_autoDefaultsEnable = 1;
+var g_autoDefaultsMode = "bank";
+var g_autoDefaultsBankSize = 83;
+var g_autoDefaultsResample = 0;
+var g_autoDefaultsWindowEnable = 1;
+var g_autoDefaultsWindowSize = 83;
+var g_autoDefaultsWindowStart = 0;
+var g_autoDefaultsAutoNext = 1;
+var g_autoDefaultsAutoNextMode = "bank_end";
+// For big files with many partials: page through banks automatically.
+var g_autoDefaultsAutoBank = 1;
+var g_autoDefaultsAutoBankMode = "osc"; // "osc" | "timer"
+var g_autoDefaultsAutoBankIntervalMs = 2500;
+// Folder playback behavior
+var g_autoDefaultsAvoidRepeat = 1;
+var g_autoDefaultsRandomStart = 1;
+
+var g_emitAvail = 1; // emit "avail" list (83 floats) on loaded/window updates
 
 function setfolder(path) {
   if (path === undefined || path === null) {
@@ -72,14 +142,260 @@ function setfilelist(n) {
 
 function setautonext(n) {
   g_autoNext = (parseInt(n, 10) ? 1 : 0);
-  outlet(1, ["autonext", g_autoNext, "delayMs", g_autoNextDelayMs]);
+  outlet(1, ["autonext", g_autoNext, "delayMs", g_autoNextDelayMs, "mode", g_autoNextMode]);
 }
 
 function setautonextdelay(ms) {
   var v = parseInt(ms, 10);
   if (isNaN(v)) return;
   g_autoNextDelayMs = Math.max(0, v);
-  outlet(1, ["autonext", g_autoNext, "delayMs", g_autoNextDelayMs]);
+  outlet(1, ["autonext", g_autoNext, "delayMs", g_autoNextDelayMs, "mode", g_autoNextMode]);
+}
+
+function setautonextmode(m) {
+  if (m === undefined || m === null) return;
+  m = String(m).toLowerCase();
+  if (m !== "loaded" && m !== "window_end" && m !== "bank_end") {
+    outlet(1, ["error", "bad_autonext_mode", m, "expected", "loaded|window_end|bank_end"]);
+    return;
+  }
+  g_autoNextMode = m;
+  outlet(1, ["autonext", g_autoNext, "delayMs", g_autoNextDelayMs, "mode", g_autoNextMode]);
+}
+
+function setautowindow(n) {
+  g_autoWindow = (parseInt(n, 10) ? 1 : 0);
+  _syncAutoWindow();
+  outlet(1, ["autowindow", g_autoWindow, "mode", g_autoWindowMode, "intervalMs", g_autoWindowIntervalMs]);
+}
+
+function setautowindowmode(m) {
+  if (m === undefined || m === null) return;
+  m = String(m).toLowerCase();
+  if (m !== "osc" && m !== "timer") {
+    outlet(1, ["error", "bad_autowindow_mode", m, "expected", "osc|timer"]);
+    return;
+  }
+  g_autoWindowMode = m;
+  _syncAutoWindow();
+  outlet(1, ["autowindow", g_autoWindow, "mode", g_autoWindowMode, "intervalMs", g_autoWindowIntervalMs]);
+}
+
+function setautowindowinterval(ms) {
+  var v = parseInt(ms, 10);
+  if (isNaN(v)) return;
+  g_autoWindowIntervalMs = Math.max(0, v);
+  _syncAutoWindow();
+  outlet(1, ["autowindow", g_autoWindow, "mode", g_autoWindowMode, "intervalMs", g_autoWindowIntervalMs]);
+}
+
+// External driver: call from OSC/bang routing to advance one window.
+function autowindowtick() {
+  if (!g_autoWindow) return;
+  _autoWindowStep("osc");
+}
+
+function setautobank(n) {
+  g_autoBank = (parseInt(n, 10) ? 1 : 0);
+  _syncAutoBank();
+  outlet(1, ["autobank", g_autoBank, "mode", g_autoBankMode, "intervalMs", g_autoBankIntervalMs]);
+}
+
+function setautobankmode(m) {
+  if (m === undefined || m === null) return;
+  m = String(m).toLowerCase();
+  if (m !== "osc" && m !== "timer") {
+    outlet(1, ["error", "bad_autobank_mode", m, "expected", "osc|timer"]);
+    return;
+  }
+  g_autoBankMode = m;
+  _syncAutoBank();
+  outlet(1, ["autobank", g_autoBank, "mode", g_autoBankMode, "intervalMs", g_autoBankIntervalMs]);
+}
+
+function setautobankinterval(ms) {
+  var v = parseInt(ms, 10);
+  if (isNaN(v)) return;
+  g_autoBankIntervalMs = Math.max(0, v);
+  _syncAutoBank();
+  outlet(1, ["autobank", g_autoBank, "mode", g_autoBankMode, "intervalMs", g_autoBankIntervalMs]);
+}
+
+function autobanktick() {
+  if (!g_autoBank) return;
+  _autoBankStep("osc");
+}
+
+// Alias: friendlier message name for patching.
+function nextbank() {
+  autobanktick();
+}
+
+function _syncAutoBank() {
+  if (g_autoBankTask !== null) {
+    try { g_autoBankTask.cancel(); } catch (e) {}
+  }
+  if (!g_autoBank) return;
+  if (g_autoBankMode !== "timer") return;
+  _scheduleAutoBankTick();
+}
+
+function _scheduleAutoBankTick() {
+  if (!g_autoBank || g_autoBankMode !== "timer") return;
+  if (g_autoBankTask === null) {
+    g_autoBankTask = new Task(_autoBankTimerTick, this);
+  } else {
+    try { g_autoBankTask.cancel(); } catch (e) {}
+  }
+  g_autoBankTask.interval = Math.max(0, parseInt(g_autoBankIntervalMs, 10) || 0);
+  g_autoBankTask.repeat(1);
+}
+
+function _autoBankTimerTick() {
+  if (!g_autoBank || g_autoBankMode !== "timer") return;
+  if (g_autoBankWaitingForLoad) {
+    _scheduleAutoBankTick();
+    return;
+  }
+  _autoBankStep("timer");
+  _scheduleAutoBankTick();
+}
+
+function _autoBankStep(source) {
+  if (!g_lastSourcePath || !String(g_lastSourcePath).length) {
+    outlet(1, ["autobank_skip", "reason", "no_path", "src", source]);
+    return;
+  }
+  if (g_isIngesting) {
+    outlet(1, ["autobank_skip", "reason", "ingesting", "src", source]);
+    return;
+  }
+
+  // If we know the file has finite partialsCount, stop paging when we reach the end.
+  var nextStart = Math.max(0, (parseInt(g_startPartial, 10) || 0) + (parseInt(g_bankSize, 10) || 83));
+  if (g_lastPartialsCount > 0 && nextStart >= g_lastPartialsCount) {
+    outlet(1, ["autobank_end", "startPartial", g_startPartial, "next", nextStart, "partialsCount", g_lastPartialsCount, "src", source]);
+    if (g_autoNext && g_autoNextMode === "bank_end") {
+      // Reuse existing auto-next machinery to jump to next file once.
+      g_autoBankWaitingForLoad = 1;
+      _maybeScheduleAutoNext();
+    }
+    return;
+  }
+
+  setstart(nextStart);
+  outlet(1, ["autobank_step", "startPartial", g_startPartial, "bankSize", g_bankSize, "src", source]);
+  // Re-ingest same file at a new startPartial. (This is O(N) scan in coll text; acceptable for occasional paging.)
+  ingest(g_lastSourcePath);
+}
+
+function _syncAutoWindow() {
+  // Cancel any existing task unless we're in timer mode and enabled.
+  if (g_autoWindowTask !== null) {
+    try { g_autoWindowTask.cancel(); } catch (e) {}
+  }
+  if (!g_autoWindow) return;
+  if (g_autoWindowMode !== "timer") return;
+  _scheduleAutoWindowTick();
+}
+
+function _scheduleAutoWindowTick() {
+  if (!g_autoWindow || g_autoWindowMode !== "timer") return;
+  if (g_autoWindowTask === null) {
+    g_autoWindowTask = new Task(_autoWindowTimerTick, this);
+  } else {
+    try { g_autoWindowTask.cancel(); } catch (e) {}
+  }
+  g_autoWindowTask.interval = Math.max(0, parseInt(g_autoWindowIntervalMs, 10) || 0);
+  g_autoWindowTask.repeat(1);
+}
+
+function _autoWindowTimerTick() {
+  if (!g_autoWindow || g_autoWindowMode !== "timer") return;
+  if (g_autoWindowWaitingForLoad) {
+    _scheduleAutoWindowTick();
+    return;
+  }
+  _autoWindowStep("timer");
+  _scheduleAutoWindowTick();
+}
+
+function _autoWindowStep(source) {
+  if (!g_windowEnable || !g_bankLoaded) {
+    outlet(1, ["autowindow_skip", "reason", "not_ready", "window", g_windowEnable, "loaded", g_bankLoaded, "src", source]);
+    return;
+  }
+  if (g_isIngesting) {
+    outlet(1, ["autowindow_skip", "reason", "ingesting", "src", source]);
+    return;
+  }
+
+  // If this step would trigger window_end and autonext is active, mark waiting to avoid spamming.
+  if (g_autoNext && g_autoNextMode === "window_end") {
+    var inc = g_windowSize;
+    var limit = _windowPointLimit();
+    if (limit > 0 && (g_windowStart + inc) >= limit) {
+      g_autoWindowWaitingForLoad = 1;
+      outlet(1, ["autowindow_wait", "reason", "window_end", "start", g_windowStart, "inc", inc, "limit", limit, "src", source]);
+      nextwindow(inc); // will emit window_end and schedule autonext
+      return;
+    }
+  }
+
+  nextwindow(g_windowSize);
+  outlet(1, ["autowindow_step", "start", g_windowStart, "size", g_windowSize, "src", source]);
+}
+
+function setjumpinterval(ms) {
+  var v = parseInt(ms, 10);
+  if (isNaN(v)) return;
+  g_jumpMinIntervalMs = Math.max(0, v);
+  outlet(1, ["jumpIntervalMs", g_jumpMinIntervalMs]);
+}
+
+function autoplay(folderPath, suffix) {
+  // Single-command workflow:
+  // 1) setfolder + scan
+  // 2) configure safe defaults (83 voices, windowed points)
+  // 3) enable autonext
+  // 4) optionally enable autobank (page through many partials)
+  // 4) jump
+  if (folderPath !== undefined && folderPath !== null) {
+    setfolder(folderPath);
+  }
+  if (suffix !== undefined && suffix !== null) {
+    g_scanSuffix = String(suffix);
+  }
+
+  if (g_autoDefaultsEnable) {
+    setmode(g_autoDefaultsMode);
+    setbank(g_autoDefaultsBankSize);
+    setresample(g_autoDefaultsResample);
+    setwindow(g_autoDefaultsWindowEnable);
+    setwindowsize(g_autoDefaultsWindowSize);
+    setwindowstart(g_autoDefaultsWindowStart);
+    setautonext(g_autoDefaultsAutoNext);
+    setautonextmode(g_autoDefaultsAutoNextMode);
+    setavoidrepeat(g_autoDefaultsAvoidRepeat);
+    setrandomstart(g_autoDefaultsRandomStart);
+    setautobank(g_autoDefaultsAutoBank);
+    setautobankmode(g_autoDefaultsAutoBankMode);
+    // interval is only used in timer mode
+    if (String(g_autoDefaultsAutoBankMode) === "timer") setautobankinterval(g_autoDefaultsAutoBankIntervalMs);
+  }
+
+  scan(g_scanSuffix);
+  jump();
+}
+
+function setautodefaults(n) {
+  g_autoDefaultsEnable = (parseInt(n, 10) ? 1 : 0);
+  outlet(1, ["autodefaults", g_autoDefaultsEnable]);
+}
+
+function setavail(n) {
+  g_emitAvail = (parseInt(n, 10) ? 1 : 0);
+  outlet(1, ["avail", "enabled", g_emitAvail]);
 }
 
 function scan(suffix) {
@@ -140,6 +456,17 @@ function jump() {
     return;
   }
 
+  if (g_isIngesting) {
+    outlet(1, ["jump_skipped", "reason", "ingesting"]);
+    return;
+  }
+  var nowMs = (Date.now ? Date.now() : (new Date()).getTime());
+  if (g_jumpMinIntervalMs > 0 && (nowMs - g_lastJumpMs) < g_jumpMinIntervalMs) {
+    outlet(1, ["jump_skipped", "reason", "throttle", "dtMs", (nowMs - g_lastJumpMs), "minMs", g_jumpMinIntervalMs]);
+    return;
+  }
+  g_lastJumpMs = nowMs;
+
   var nextIdx = _pickRandomIndex(g_files.length, g_currentFileIdx, g_avoidRepeat);
   g_currentFileIdx = nextIdx;
 
@@ -180,6 +507,66 @@ function setresample(n) {
 
 function setkeyoffset(n) {
   g_keyOffset = parseInt(n, 10) || 0;
+}
+
+function setwindow(n) {
+  g_windowEnable = (parseInt(n, 10) ? 1 : 0);
+  outlet(1, ["window", g_windowEnable, "start", g_windowStart, "size", g_windowSize, "padHold", g_windowPadHold]);
+}
+
+function setwindowstart(n) {
+  g_windowStart = Math.max(0, parseInt(n, 10) || 0);
+  _clampWindowStartToFile();
+  outlet(1, ["window", g_windowEnable, "start", g_windowStart, "size", g_windowSize, "padHold", g_windowPadHold]);
+  if (g_windowEnable) applywindow();
+}
+
+function setwindowsize(n) {
+  var v = parseInt(n, 10) || 0;
+  if (v > 1) g_windowSize = v;
+  outlet(1, ["window", g_windowEnable, "start", g_windowStart, "size", g_windowSize, "padHold", g_windowPadHold]);
+  if (g_windowEnable) applywindow();
+}
+
+function setwindowpad(n) {
+  g_windowPadHold = (parseInt(n, 10) ? 1 : 0);
+  outlet(1, ["window", g_windowEnable, "start", g_windowStart, "size", g_windowSize, "padHold", g_windowPadHold]);
+  if (g_windowEnable) applywindow();
+}
+
+function nextwindow(step) {
+  var s = parseInt(step, 10);
+  var inc = (!isNaN(s) && s > 0) ? s : g_windowSize;
+
+  // If we're in window mode and auto-next is enabled, advance to next file when we hit the end.
+  if (g_windowEnable && g_autoNext && g_autoNextMode === "window_end") {
+    var limit = _windowPointLimit();
+    if (limit > 0 && (g_windowStart + inc) >= limit) {
+      outlet(1, ["window_end", "start", g_windowStart, "inc", inc, "limit", limit]);
+      _maybeScheduleAutoNext();
+      return;
+    }
+  }
+
+  g_windowStart += inc;
+  _clampWindowStartToFile();
+  outlet(1, ["window", g_windowEnable, "start", g_windowStart, "size", g_windowSize, "padHold", g_windowPadHold]);
+  if (g_windowEnable) applywindow();
+}
+
+function prevwindow(step) {
+  var s = parseInt(step, 10);
+  if (!isNaN(s) && s > 0) g_windowStart -= s;
+  else g_windowStart -= g_windowSize;
+  if (g_windowStart < 0) g_windowStart = 0;
+  _clampWindowStartToFile();
+  outlet(1, ["window", g_windowEnable, "start", g_windowStart, "size", g_windowSize, "padHold", g_windowPadHold]);
+  if (g_windowEnable) applywindow();
+}
+
+function applywindow() {
+  if (!g_windowEnable) return;
+  _applyPointWindowToColl();
 }
 
 function clear() {
@@ -234,6 +621,23 @@ function ingest(path, startPartial, bankSize, pointsPerPartial, resampleFlag) {
   g_bankData = {};
   g_bankLoaded = false;
   g_fullLoaded = false;
+  g_fullTriplets = {};
+  if (g_windowEnable) g_windowStart = Math.max(0, parseInt(g_autoDefaultsWindowStart, 10) || 0);
+  g_lastMinPoints = 0;
+  g_isIngesting = 1;
+  if (g_autoNextTask !== null) {
+    try { g_autoNextTask.cancel(); } catch (e) {}
+  }
+  // Reset coll cache if file changes
+  if (String(g_lastSourcePath) !== String(g_collCachePath)) {
+    g_collCachePath = String(g_lastSourcePath);
+    g_collCacheSawPointType = 0;
+    g_collCacheBaseKey = 1;
+    g_collCacheOffsets = {};
+    g_collCacheMaxKeyIndexed = -1;
+    g_collCacheLastPos = 0;
+    g_collCacheMaxKeyOverall = -1;
+  }
 
   outlet(1, ["ingest", g_lastSourcePath, "mode", g_mode, "startPartial", g_startPartial, "bankSize", g_bankSize, "points", g_pointsPerPartial, "resample", g_resample]);
 
@@ -273,12 +677,58 @@ function ingest(path, startPartial, bankSize, pointsPerPartial, resampleFlag) {
   // Default: par-text format
   _ingestParTextFile(f);
   f.close();
+  g_isIngesting = 0;
   return;
+}
+
+function _startCollFlush(meta) {
+  g_collFlushMeta = meta || null;
+  if (g_collFlushTask === null) {
+    g_collFlushTask = new Task(_collFlushTick, this);
+  } else {
+    try { g_collFlushTask.cancel(); } catch (e) {}
+  }
+  g_collFlushTask.interval = 0;
+  g_collFlushTask.repeat(1);
+}
+
+function _collFlushTick() {
+  // Emit a few store messages per tick to keep Max responsive.
+  var n = Math.max(1, parseInt(g_collFlushBatch, 10) || 1);
+  var sent = 0;
+  while (sent < n && g_collFlushQueue.length > 0) {
+    var msg = g_collFlushQueue.shift();
+    outlet(0, msg);
+    sent++;
+  }
+
+  if (g_collFlushQueue.length > 0) {
+    // Keep flushing
+    try { g_collFlushTask.repeat(1); } catch (e) {}
+    return;
+  }
+
+  // Done: mark ingest finished and emit "loaded" once.
+  var meta = g_collFlushMeta || {};
+  g_collFlushMeta = null;
+  g_isIngesting = 0;
+
+  outlet(1, meta.loadedMsg);
+  _emitAvailFromBank();
+  g_autoWindowWaitingForLoad = 0;
+  if (g_autoWindow && g_autoWindowMode === "timer") _syncAutoWindow();
+  g_autoBankWaitingForLoad = 0;
+  if (g_autoBank && g_autoBankMode === "timer") _syncAutoBank();
+  if (g_autoNextMode === "loaded") _maybeScheduleAutoNext();
 }
 
 function _maybeScheduleAutoNext() {
   if (!g_autoNext) return;
   if (!g_files || g_files.length === 0) return;
+  if (g_autoNextMode === "loaded" && g_windowEnable) {
+    // In window mode, "loaded" is usually too fast; prefer window_end.
+    // Still allow it if user explicitly sets the mode.
+  }
   // Avoid tight recursive loops; schedule jump in the future.
   try {
     if (g_autoNextTask === null) {
@@ -286,9 +736,12 @@ function _maybeScheduleAutoNext() {
     } else {
       g_autoNextTask.cancel();
     }
-    g_autoNextTask.interval = Math.max(0, parseInt(g_autoNextDelayMs, 10) || 0);
+    // Respect jump throttle: if delay < jumpMinInterval, jump() may get skipped.
+    var wantDelay = Math.max(0, parseInt(g_autoNextDelayMs, 10) || 0);
+    if (g_jumpMinIntervalMs > 0) wantDelay = Math.max(wantDelay, g_jumpMinIntervalMs + 10);
+    g_autoNextTask.interval = wantDelay;
     g_autoNextTask.repeat(1);
-    outlet(1, ["autonext_scheduled", "in", g_autoNextDelayMs, "ms"]);
+    outlet(1, ["autonext_scheduled", "in", g_autoNextTask.interval, "ms"]);
   } catch (e) {
     // If Task isn't available for some reason, fall back to immediate jump (still guarded).
     outlet(1, ["autonext_fallback"]);
@@ -300,7 +753,91 @@ function _autoNextTick() {
   // Only proceed if autoplay is still on.
   if (!g_autoNext) return;
   if (!g_files || g_files.length === 0) return;
+  // Reset window when switching files
+  if (g_windowEnable) g_windowStart = Math.max(0, parseInt(g_autoDefaultsWindowStart, 10) || 0);
+  g_autoBankWaitingForLoad = 0;
   jump();
+}
+
+function _sliceFlatTriplets(fullFlat) {
+  var wantN = Math.max(1, parseInt(g_windowSize, 10) || 1);
+  var start = Math.max(0, parseInt(g_windowStart, 10) || 0) * 3;
+  var wantLen = wantN * 3;
+  var out = new Array(wantLen);
+
+  var lastT = 0.0, lastF = 0.0, lastA = 0.0;
+  if (fullFlat && fullFlat.length >= 3) {
+    lastT = fullFlat[fullFlat.length - 3];
+    lastF = fullFlat[fullFlat.length - 2];
+    lastA = fullFlat[fullFlat.length - 1];
+  }
+
+  for (var i = 0; i < wantLen; i++) {
+    var idx = start + i;
+    if (fullFlat && idx < fullFlat.length) {
+      out[i] = fullFlat[idx];
+    } else {
+      if (!g_windowPadHold) {
+        out[i] = 0.0;
+      } else {
+        var m = i % 3;
+        out[i] = (m === 0) ? lastT : (m === 1 ? lastF : lastA);
+      }
+    }
+  }
+  return out;
+}
+
+function _applyPointWindowToColl() {
+  var keys = _sortedNumericKeys(g_fullTriplets);
+  if (!keys || keys.length === 0) return;
+
+  outlet(0, "clear");
+  g_bankData = {};
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i];
+    var full = g_fullTriplets[k];
+    var win = _sliceFlatTriplets(full);
+    g_bankData[k] = win;
+    var msg = ["store", k];
+    for (var j = 0; j < win.length; j++) msg.push(win[j]);
+    outlet(0, msg);
+  }
+  g_bankLoaded = true;
+  g_fullLoaded = false;
+  outlet(1, ["window_applied", "start", g_windowStart, "size", g_windowSize, "padHold", g_windowPadHold]);
+  _emitAvailFromBank();
+}
+
+function _windowPointLimit() {
+  // Window advance limit in points.
+  // Old behavior used MIN points across voices, which can collapse the limit if any partial is very short.
+  // In practice we prefer MAX points across voices and rely on padHold (or zeros) for shorter partials.
+  if (g_lastMinPoints > 0) return g_lastMinPoints;
+  var keys = _sortedNumericKeys(g_fullTriplets);
+  if (!keys || keys.length === 0) return 0;
+  var minP = 0;
+  var maxP = 0;
+  for (var i = 0; i < keys.length; i++) {
+    var flat = g_fullTriplets[keys[i]];
+    if (!flat) continue;
+    var p = Math.floor(flat.length / 3);
+    if (p <= 0) continue;
+    if (minP === 0 || p < minP) minP = p;
+    if (p > maxP) maxP = p;
+  }
+  // Use max points so window can advance through long partials even if some voices are short.
+  var limitP = (maxP > 0 ? maxP : minP);
+  g_lastMinPoints = limitP;
+  return limitP;
+}
+
+function _clampWindowStartToFile() {
+  if (!g_windowEnable) return;
+  var limit = _windowPointLimit();
+  if (limit <= 0) return;
+  var maxStart = Math.max(0, limit - g_windowSize);
+  if (g_windowStart > maxStart) g_windowStart = maxStart;
 }
 
 function _makeProgressReporter(f) {
@@ -341,33 +878,79 @@ function _ingestCollTextFile(f) {
   var maxKeySeen = -1;
   var report = _makeProgressReporter(f);
 
-  // First pass: detect if there's a point-type header at key 1
-  var firstPassLines = 0;
-  while (f.position < f.eof && firstPassLines < 20) {
-    var line = f.readline();
-    if (line === null) break;
-    firstPassLines++;
-    line = String(line).trim();
-    if (!line.length) continue;
-    var m0 = line.match(/^(\d+)\s*,\s*(.*)$/);
-    if (!m0) continue;
-    var k0 = parseInt(m0[1], 10);
-    var payload0 = String(m0[2]).replace(/;+\s*$/, "").trim();
-    if (k0 === 1 && payload0.indexOf("point-type") === 0) {
-      sawPointType = true;
-      break;
+  // Detect if there's a point-type header at key 1 (cache per file)
+  if (g_collCachePath && String(g_lastSourcePath) === String(g_collCachePath) && (g_collCacheSawPointType === 1 || g_collCacheSawPointType === 0)) {
+    // If we already indexed some keys, trust cached header state.
+    if (g_collCacheMaxKeyIndexed >= 0) {
+      sawPointType = (g_collCacheSawPointType ? true : false);
+      baseKey = parseInt(g_collCacheBaseKey, 10) || 1;
+    } else {
+      var firstPassLines = 0;
+      while (f.position < f.eof && firstPassLines < 20) {
+        var line = f.readline();
+        if (line === null) break;
+        firstPassLines++;
+        line = String(line).trim();
+        if (!line.length) continue;
+        var m0 = line.match(/^(\d+)\s*,\s*(.*)$/);
+        if (!m0) continue;
+        var k0 = parseInt(m0[1], 10);
+        var payload0 = String(m0[2]).replace(/;+\s*$/, "").trim();
+        if (k0 === 1 && payload0.indexOf("point-type") === 0) {
+          sawPointType = true;
+          break;
+        }
+        report("probe");
+      }
+      f.position = 0;
+      baseKey = sawPointType ? 3 : 1;
+      g_collCacheSawPointType = (sawPointType ? 1 : 0);
+      g_collCacheBaseKey = baseKey;
     }
-    report("probe");
   }
-  f.position = 0;
-  baseKey = sawPointType ? 3 : 1;
 
   // In full mode, store keys as partialIndex (0-based): outKey = key - baseKey (+ keyOffset)
   // In bank mode, store only key range [baseKey+startPartial .. baseKey+startPartial+bankSize-1] into keys keyOffset..keyOffset+bankSize-1
   var wantStartKey = baseKey + g_startPartial;
   var wantEndKey = baseKey + g_startPartial + g_bankSize - 1;
 
+  // If in bank mode, try to seek directly to the start key using cached offsets.
+  if (g_mode === "bank") {
+    var startPos = g_collCacheOffsets[wantStartKey];
+    if (startPos !== undefined && startPos !== null) {
+      try {
+        f.position = startPos;
+      } catch (e) {
+        f.position = 0;
+      }
+    } else if (g_collCacheMaxKeyIndexed >= 0 && g_collCacheLastPos > 0) {
+      // Seek to last known position and index forward from there (useful for sequential autobank paging).
+      try {
+        f.position = g_collCacheLastPos;
+      } catch (e2) {
+        f.position = 0;
+      }
+    } else {
+      f.position = 0;
+    }
+  }
+
+  // Estimate max key from tail once (fast) so partialsCount stays correct without full scan.
+  if (g_collCacheMaxKeyOverall < 0) {
+    try {
+      g_collCacheMaxKeyOverall = _coll_tail_max_key(f, sawPointType);
+    } catch (e3) {
+      g_collCacheMaxKeyOverall = -1;
+    }
+    // restore to current scanning pos (tail scan moves position)
+    // We'll reset below to current f.position by keeping local curPos.
+  }
+
+  // Build coll store messages into a queue; we'll flush them in small batches.
+  g_collFlushQueue = [];
+
   while (f.position < f.eof) {
+    var posBefore = f.position;
     var lineC = f.readline();
     if (lineC === null) break;
     lineC = String(lineC).trim();
@@ -378,6 +961,15 @@ function _ingestCollTextFile(f) {
     var key = parseInt(m[1], 10);
     if (!(key >= 0)) continue;
     if (key > maxKeySeen) maxKeySeen = key;
+
+    // Cache file offset for this key if not already known
+    if (g_collCacheOffsets[key] === undefined) {
+      g_collCacheOffsets[key] = posBefore;
+      if (key > g_collCacheMaxKeyIndexed) {
+        g_collCacheMaxKeyIndexed = key;
+        g_collCacheLastPos = posBefore;
+      }
+    }
 
     // Skip metadata keys if present
     if (sawPointType && (key === 1 || key === 2)) continue;
@@ -406,35 +998,55 @@ function _ingestCollTextFile(f) {
       aArr[i] = parseFloat(atoms[wi++]);
     }
 
-    var flat;
-    if (g_resample) {
-      flat = _resampleToFlatTriplets(tArr, fArr, aArr, tArr[0], tArr[nTrip - 1], g_pointsPerPartial);
-    } else {
-      flat = _rawToFlatTriplets(tArr, fArr, aArr, nTrip);
-    }
+    var flatFull;
+    if (g_resample) flatFull = _resampleToFlatTriplets(tArr, fArr, aArr, tArr[0], tArr[nTrip - 1], g_pointsPerPartial);
+    else flatFull = _rawToFlatTriplets(tArr, fArr, aArr, nTrip);
 
     var outKey;
     if (g_mode === "bank") {
       outKey = g_keyOffset + (key - wantStartKey);
-      g_bankData[outKey] = flat;
+      if (g_windowEnable) {
+        g_fullTriplets[outKey] = flatFull;
+        g_bankData[outKey] = _sliceFlatTriplets(flatFull);
+      } else {
+        g_bankData[outKey] = flatFull;
+      }
     } else {
       outKey = g_keyOffset + (key - baseKey);
+      if (g_windowEnable) {
+        g_fullTriplets[outKey] = flatFull;
+        g_bankData[outKey] = _sliceFlatTriplets(flatFull);
+      }
     }
 
-    // Store into coll immediately
+    // Queue store for chunked flush (avoids UI stalls)
     var msg = ["store", outKey];
-    for (var j = 0; j < flat.length; j++) msg.push(flat[j]);
-    outlet(0, msg);
+    var sendFlat = (g_windowEnable ? g_bankData[outKey] : flatFull);
+    for (var j = 0; j < sendFlat.length; j++) msg.push(sendFlat[j]);
+    g_collFlushQueue.push(msg);
 
     // progress (rate-limited)
     report("coll", "key", outKey);
+
+    // In bank mode, keys are ordered; once we passed the end of the window, we can stop.
+    if (g_mode === "bank" && key >= wantEndKey) {
+      break;
+    }
   }
 
   // Estimate partials count from max key seen
-  if (maxKeySeen >= baseKey) g_lastPartialsCount = (maxKeySeen - baseKey + 1);
-  else g_lastPartialsCount = -1;
+  if (g_collCacheMaxKeyOverall >= baseKey) {
+    g_lastPartialsCount = (g_collCacheMaxKeyOverall - baseKey + 1);
+  } else if (maxKeySeen >= baseKey) {
+    g_lastPartialsCount = (maxKeySeen - baseKey + 1);
+  } else {
+    g_lastPartialsCount = -1;
+  }
 
-  if (g_mode === "bank") {
+  if (g_windowEnable) {
+    g_bankLoaded = true;
+    g_fullLoaded = false;
+  } else if (g_mode === "bank") {
     g_bankLoaded = true;
     g_fullLoaded = false;
   } else {
@@ -442,8 +1054,38 @@ function _ingestCollTextFile(f) {
     g_fullLoaded = true;
   }
 
-  outlet(1, ["loaded", g_lastSourcePath, "format", "coll", "mode", g_mode, "startPartial", g_startPartial, "bankSize", g_bankSize, "points", g_pointsPerPartial, "resample", g_resample, "partialsCount", g_lastPartialsCount, "baseKey", baseKey]);
-  _maybeScheduleAutoNext();
+  // Emit "loaded" only after coll flush completes (prevents UI thrash).
+  var loadedMsg = ["loaded", g_lastSourcePath, "format", "coll", "mode", g_mode, "startPartial", g_startPartial, "bankSize", g_bankSize, "points", g_pointsPerPartial, "resample", g_resample, "partialsCount", g_lastPartialsCount, "baseKey", baseKey, "window", g_windowEnable, "wStart", g_windowStart, "wSize", g_windowSize];
+  _startCollFlush({ loadedMsg: loadedMsg });
+}
+
+function _coll_tail_max_key(f, sawPointType) {
+  // Fast max-key estimate by scanning last ~64KB of the file.
+  // Returns the maximum numeric key found, or -1.
+  var oldPos = f.position;
+  var maxK = -1;
+  try {
+    var start = f.eof - 65536;
+    if (start < 0) start = 0;
+    f.position = start;
+    while (f.position < f.eof) {
+      var p0 = f.position;
+      var line = f.readline();
+      if (line === null) break;
+      line = String(line).trim();
+      if (!line.length) continue;
+      var m = line.match(/^(\d+)\s*,\s*(.*)$/);
+      if (!m) continue;
+      var key = parseInt(m[1], 10);
+      if (!(key >= 0)) continue;
+      if (sawPointType && (key === 1 || key === 2)) continue;
+      if (key > maxK) maxK = key;
+    }
+  } catch (e) {
+    maxK = -1;
+  }
+  try { f.position = oldPos; } catch (e2) {}
+  return maxK;
 }
 
 function _ingestParTextFile(f) {
@@ -497,25 +1139,32 @@ function _ingestParTextFile(f) {
     if (needTripletTokens !== 0) return;
     if (!capture) return;
 
-    var flat;
-    if (g_resample) {
-      flat = _resampleToFlatTriplets(rawT, rawF, rawA, curStartT, curEndT, g_pointsPerPartial);
-    } else {
-      flat = _rawToFlatTriplets(rawT, rawF, rawA, curPointCount);
-    }
+    var flatFull;
+    if (g_resample) flatFull = _resampleToFlatTriplets(rawT, rawF, rawA, curStartT, curEndT, g_pointsPerPartial);
+    else flatFull = _rawToFlatTriplets(rawT, rawF, rawA, curPointCount);
 
     // Determine output key and store/emit
     var outKey;
     if (g_mode === "bank") {
       var voiceIdx = (curPartialId - wantStart);
       outKey = g_keyOffset + voiceIdx;
-      g_bankData[outKey] = flat;
+      if (g_windowEnable) {
+        g_fullTriplets[outKey] = flatFull;
+        g_bankData[outKey] = _sliceFlatTriplets(flatFull);
+      } else {
+        g_bankData[outKey] = flatFull;
+      }
     } else {
       outKey = g_keyOffset + curPartialId;
+      if (g_windowEnable) {
+        g_fullTriplets[outKey] = flatFull;
+        g_bankData[outKey] = _sliceFlatTriplets(flatFull);
+      }
     }
 
     var msg = ["store", outKey];
-    for (var j = 0; j < flat.length; j++) msg.push(flat[j]);
+    var sendFlat = (g_windowEnable ? g_bankData[outKey] : flatFull);
+    for (var j = 0; j < sendFlat.length; j++) msg.push(sendFlat[j]);
     outlet(0, msg);
 
     // progress (rate-limited)
@@ -609,8 +1258,17 @@ function _ingestParTextFile(f) {
     g_fullLoaded = true;
   }
 
-  outlet(1, ["loaded", g_lastSourcePath, "format", "par-text", "mode", g_mode, "startPartial", g_startPartial, "bankSize", g_bankSize, "points", g_pointsPerPartial, "resample", g_resample, "partialsCount", g_lastPartialsCount]);
-  _maybeScheduleAutoNext();
+  if (g_windowEnable) {
+    g_bankLoaded = true;
+    g_fullLoaded = false;
+  }
+  outlet(1, ["loaded", g_lastSourcePath, "format", "par-text", "mode", g_mode, "startPartial", g_startPartial, "bankSize", g_bankSize, "points", g_pointsPerPartial, "resample", g_resample, "partialsCount", g_lastPartialsCount, "window", g_windowEnable, "wStart", g_windowStart, "wSize", g_windowSize]);
+  _emitAvailFromBank();
+  g_autoWindowWaitingForLoad = 0;
+  if (g_autoWindow && g_autoWindowMode === "timer") _syncAutoWindow();
+  g_autoBankWaitingForLoad = 0;
+  if (g_autoBank && g_autoBankMode === "timer") _syncAutoBank();
+  if (g_autoNextMode === "loaded") _maybeScheduleAutoNext();
 }
 
 function exportcoll(outfile) {
@@ -664,6 +1322,28 @@ function _emitBankToColl() {
     for (var j = 0; j < flat.length; j++) msg.push(flat[j]);
     outlet(0, msg);
   }
+}
+
+function _emitAvailFromBank() {
+  if (!g_emitAvail) return;
+  // Compute "availability" per voice from current published bank data.
+  // We use max amplitude across the current window for each key.
+  var n = parseInt(g_bankSize, 10) || 0;
+  if (n < 1) n = 1;
+  var out = new Array(n);
+  for (var i = 0; i < n; i++) {
+    var k = g_keyOffset + i;
+    var flat = g_bankData[k];
+    var maxA = 0.0;
+    if (flat && flat.length >= 3) {
+      for (var j = 2; j < flat.length; j += 3) {
+        var a = parseFloat(flat[j]);
+        if (!isNaN(a) && a > maxA) maxA = a;
+      }
+    }
+    out[i] = maxA;
+  }
+  outlet(1, ["avail", n].concat(out));
 }
 
 function _isIntegerToken(s) {

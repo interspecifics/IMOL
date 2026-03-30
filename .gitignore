@@ -21,10 +21,17 @@ python-light-engine/pattern_sets.json
 
 # Large local data (do not commit)
 audio/
+*.wav
+*.wav.asd
+max_resynth/tan_*.txt
+max_resynth/partials/
 
 # Local virtualenvs / caches (do not commit)
+.imol-cv/
 imol-cv-env/
+imol-venv/
 python-light-engine/.imol-cv/
+python-light-engine/imol-venv/
 
 # Max/MSP (keep in repo)
 

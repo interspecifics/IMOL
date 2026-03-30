@@ -11,11 +11,13 @@ from ola.OlaClient import OLADNotRunningException
 class DmxByteArray(bytearray):
     """
     Small compatibility wrapper so that OLA's Python bindings (which expect
-    a 'tostring()' method) work on modern Python versions where bytearray
-    only exposes 'tobytes()'.
+    a 'tostring()' or 'tobytes()' method) work across OLA versions.
     """
 
     def tostring(self):
+        return bytes(self)
+
+    def tobytes(self):
         return bytes(self)
 
 

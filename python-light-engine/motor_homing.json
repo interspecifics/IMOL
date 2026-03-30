@@ -1,0 +1,31 @@
+{
+  "center_a": null,
+  "center_b": null,
+  "invert_a": false,
+  "invert_b": false,
+  "low_range_speed_reversed": true,
+  "marker": {
+    "h": 60,
+    "smin": 60,
+    "tol": 25,
+    "vmin": 60
+  },
+  "motor_cam_view": {
+    "enabled": true,
+    "flip": "none",
+    "index": 1,
+    "pan_x": 0.0,
+    "pan_y": 0.0,
+    "rotate": 0,
+    "zoom": 1.0
+  },
+  "roi_a": null,
+  "roi_b": null,
+  "roi_pts_a": [],
+  "roi_pts_b": [],
+  "tol_deg": 2.5,
+  "zero_a": null,
+  "zero_b": null,
+  "zero_pts_a": [],
+  "zero_pts_b": []
+}

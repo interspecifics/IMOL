@@ -1,0 +1,5 @@
+{
+  "enabled": true,
+  "burst_duration_s": 3.0,
+  "interval_s": 920.0
+}
