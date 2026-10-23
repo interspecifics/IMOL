@@ -1,0 +1,7 @@
+PySide6
+opencv-contrib-python
+numpy
+librosa
+soundfile>=0.13
+python-osc
+scikit-learn

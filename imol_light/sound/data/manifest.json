@@ -1,0 +1,180 @@
+{
+  "files": [
+    "a-protest-in-bogota-colombia.wav",
+    "acoustic-mordor-malaga.wav",
+    "anti-austerity-protest-athens-greece.wav",
+    "call-and-response-occupy-la.wav",
+    "cinema-is-truth-24-times-a-second.wav",
+    "democracia-new-york.wav",
+    "edinburgh-climate-protests-the-mound.wav",
+    "kill-the-bill-protest-parliament-square.wav",
+    "manifestants-parade-bogota.wav",
+    "not-my-president.wav",
+    "on-with-the-struggle-istanbul.wav",
+    "protest-in-tahrir-square-cairo.wav",
+    "protest-resolution.wav",
+    "rhythms-of-protest-paris.wav",
+    "serbian-protest.wav",
+    "subterranean-protest-malaga.wav",
+    "the-last-1-000-metres-madrid.wav",
+    "the-last-900-metres-madrid.wav",
+    "the-value-of-noise.wav"
+  ],
+  "spectralBanks": 114,
+  "voicesPerBank": 83,
+  "spectralMode": "weighted mean frequency + normalized peak amplitude",
+  "recordings": [
+    {
+      "id": "a-protest-in-bogota-colombia",
+      "audio": "a-protest-in-bogota-colombia.wav",
+      "source": "tan_a-protest-in-bogota-colombia.txt",
+      "method": "max-coll",
+      "partials": "partials/a-protest-in-bogota-colombia.scd",
+      "banks": 6
+    },
+    {
+      "id": "acoustic-mordor-malaga",
+      "audio": "acoustic-mordor-malaga.wav",
+      "source": "tan_acoustic-mordor-malaga.txt",
+      "method": "max-coll",
+      "partials": "partials/acoustic-mordor-malaga.scd",
+      "banks": 6
+    },
+    {
+      "id": "anti-austerity-protest-athens-greece",
+      "audio": "anti-austerity-protest-athens-greece.wav",
+      "source": "tan_anti-austerity-protest-athens-greece.txt",
+      "method": "max-coll",
+      "partials": "partials/anti-austerity-protest-athens-greece.scd",
+      "banks": 6
+    },
+    {
+      "id": "call-and-response-occupy-la",
+      "audio": "call-and-response-occupy-la.wav",
+      "source": "call-and-response-occupy-la.txt",
+      "method": "spear-partials",
+      "partials": "partials/call-and-response-occupy-la.scd",
+      "banks": 6
+    },
+    {
+      "id": "cinema-is-truth-24-times-a-second",
+      "audio": "cinema-is-truth-24-times-a-second.wav",
+      "source": "cinema-is-truth-24-times-a-second.txt",
+      "method": "spear-partials",
+      "partials": "partials/cinema-is-truth-24-times-a-second.scd",
+      "banks": 6
+    },
+    {
+      "id": "democracia-new-york",
+      "audio": "democracia-new-york.wav",
+      "source": "democracia-new-york.txt",
+      "method": "spear-partials",
+      "partials": "partials/democracia-new-york.scd",
+      "banks": 6
+    },
+    {
+      "id": "edinburgh-climate-protests-the-mound",
+      "audio": "edinburgh-climate-protests-the-mound.wav",
+      "source": "edinburgh-climate-protests-the-mound.txt",
+      "method": "spear-partials",
+      "partials": "partials/edinburgh-climate-protests-the-mound.scd",
+      "banks": 6
+    },
+    {
+      "id": "kill-the-bill-protest-parliament-square",
+      "audio": "kill-the-bill-protest-parliament-square.wav",
+      "source": "kill-the-bill-protest-parliament-square.txt",
+      "method": "spear-partials",
+      "partials": "partials/kill-the-bill-protest-parliament-square.scd",
+      "banks": 6
+    },
+    {
+      "id": "manifestants-parade-bogota",
+      "audio": "manifestants-parade-bogota.wav",
+      "source": "manifestants-parade-bogota.txt",
+      "method": "spear-partials",
+      "partials": "partials/manifestants-parade-bogota.scd",
+      "banks": 6
+    },
+    {
+      "id": "not-my-president",
+      "audio": "not-my-president.wav",
+      "source": "not-my-president.txt",
+      "method": "spear-partials",
+      "partials": "partials/not-my-president.scd",
+      "banks": 6
+    },
+    {
+      "id": "on-with-the-struggle-istanbul",
+      "audio": "on-with-the-struggle-istanbul.wav",
+      "source": "on-with-the-struggle-istanbul.txt",
+      "method": "spear-frames",
+      "partials": "partials/on-with-the-struggle-istanbul.scd",
+      "banks": 6
+    },
+    {
+      "id": "protest-in-tahrir-square-cairo",
+      "audio": "protest-in-tahrir-square-cairo.wav",
+      "source": "protest-in-tahrir-square-cairo.wav",
+      "method": "fft-peaks",
+      "partials": "partials/protest-in-tahrir-square-cairo.scd",
+      "banks": 6
+    },
+    {
+      "id": "protest-resolution",
+      "audio": "protest-resolution.wav",
+      "source": "protest-resolution.txt",
+      "method": "spear-frames",
+      "partials": "partials/protest-resolution.scd",
+      "banks": 6
+    },
+    {
+      "id": "rhythms-of-protest-paris",
+      "audio": "rhythms-of-protest-paris.wav",
+      "source": "rhythms-of-protest-paris.txt",
+      "method": "spear-frames",
+      "partials": "partials/rhythms-of-protest-paris.scd",
+      "banks": 6
+    },
+    {
+      "id": "serbian-protest",
+      "audio": "serbian-protest.wav",
+      "source": "serbian-protest.txt",
+      "method": "spear-frames",
+      "partials": "partials/serbian-protest.scd",
+      "banks": 6
+    },
+    {
+      "id": "subterranean-protest-malaga",
+      "audio": "subterranean-protest-malaga.wav",
+      "source": "subterranean-protest-malaga.txt",
+      "method": "spear-frames",
+      "partials": "partials/subterranean-protest-malaga.scd",
+      "banks": 6
+    },
+    {
+      "id": "the-last-1-000-metres-madrid",
+      "audio": "the-last-1-000-metres-madrid.wav",
+      "source": "the-last-1-000-metres-madrid.txt",
+      "method": "spear-frames",
+      "partials": "partials/the-last-1-000-metres-madrid.scd",
+      "banks": 6
+    },
+    {
+      "id": "the-last-900-metres-madrid",
+      "audio": "the-last-900-metres-madrid.wav",
+      "source": "the-last-900-metres-madrid.txt",
+      "method": "spear-frames",
+      "partials": "partials/the-last-900-metres-madrid.scd",
+      "banks": 6
+    },
+    {
+      "id": "the-value-of-noise",
+      "audio": "the-value-of-noise.wav",
+      "source": "the-value-of-noise.wav",
+      "method": "fft-peaks",
+      "partials": "partials/the-value-of-noise.scd",
+      "banks": 6
+    }
+  ]
+}

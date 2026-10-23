@@ -1,0 +1,81 @@
+IMOL LIGHT — INSTALACIÓN Y USO EN OTRA COMPUTADORA
+Guía breve para macOS · Cámara, graphic score y cuatro voces de SuperCollider
+
+1. DESCARGAR EL PROYECTO
+
+Clonar la rama de IMOL Light:
+
+  git clone --branch imol-light --single-branch https://github.com/interspecifics/IMOL.git IMOL
+  cd IMOL/imol_light
+
+La rama incluye score, sonido, parciales, 19 MP3 completos con metadatos y un
+banco FLAC sin pérdida para generar las muestras WAV del motor.
+No se necesita Max ni otra copia de IMOL. No copiar entornos .venv entre equipos.
+
+2. INSTALAR LOS PROGRAMAS — SOLO LA PRIMERA VEZ
+
+• Instalar Python 3.13 para macOS desde:
+  https://www.python.org/downloads/macos/
+• Instalar SuperCollider 3.14.1 y colocarlo en Aplicaciones:
+  https://supercollider.github.io/downloads
+  Elegir la descarga compatible con la versión de macOS del equipo.
+• Conectar la cámara y elegir la salida de sonido en Ajustes del Sistema.
+
+Abrir Terminal. Escribir «cd » (con un espacio), arrastrar la carpeta imol_light
+a la ventana y pulsar Enter. Ejecutar estas líneas, una por una:
+
+  python3.13 -m venv .venv
+  .venv/bin/python -m pip install --upgrade pip
+  .venv/bin/python -m pip install -r requirements.txt
+  .venv/bin/python tools/prepare_audio.py
+
+La instalación de dependencias necesita conexión a internet.
+Los entornos virtuales se recrean en cada equipo; documentación oficial:
+https://docs.python.org/3/library/venv.html
+
+3. COMPROBAR Y ARRANCAR
+
+Desde la misma carpeta, comprobar la instalación:
+
+  .venv/bin/python tools/launch.py --check
+
+Si aparece «OK», iniciar cámara, score y sonido:
+
+  .venv/bin/python tools/launch.py --audio-folder assets/archives --display 0
+
+Aceptar el permiso de cámara cuando macOS lo solicite. Esperar al aprendizaje
+inicial de cámara y al análisis del audio. No es necesario abrir los archivos
+de SuperCollider manualmente.
+
+El lanzador usa los MP3 completos con metadatos por defecto. También puede indicarse:
+
+  .venv/bin/python tools/launch.py --audio-folder assets/archives --display 0
+
+4. USAR Y DETENER
+
+• El audio cargado en el score selecciona automáticamente sus parciales.
+• Si un audio nuevo no tiene parciales, el score genera una aproximación.
+• Reflection responde a posición, brillo, tamaño y velocidad de la región
+  de mayor área. Se desvanece si desaparece la detección.
+• Play recorre el análisis visual; no es el interruptor general del sonido.
+• Para terminar, cerrar la ventana del score o pulsar Ctrl+C en Terminal.
+
+SOLUCIONES RÁPIDAS
+
+• WAV ausentes: ejecutar .venv/bin/python tools/prepare_audio.py.
+  El banco incluido contiene los primeros 60 segundos del primer canal de cada
+  WAV original. Subir sampleSeconds requiere aportar WAV más largos.
+• Cámara incorrecta: añadir al comando de arranque:
+  --camera-auto-disable --camera-index 0
+  Si no es la cámara deseada, probar índice 1. Revisar el permiso de cámara
+  para Terminal o la aplicación desde la que se inició el programa.
+• Imagen girada: añadir --camera-rotate 0 al comando de arranque.
+• Puerto ocupado: cerrar otras sesiones de IMOL y patches Max que usen OSC 9001.
+• Sin sonido: revisar la salida del sistema; reiniciar IMOL después de cambiarla.
+  Los niveles están en sound/supercollider/config.scd: master y los niveles
+  spectralLevel, granularLevel, grooveLevel y reflectionLevel.
+• Si SuperCollider no arranca, consultar runtime/supercollider.log.
+
+Esta guía corresponde al lanzador actual para macOS. La instalación desde cero
+en el equipo de destino debe comprobarse con --check y una prueba de cámara y
+escucha; no se ha validado aquí una instalación nueva con Python 3.13.

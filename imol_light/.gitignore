@@ -1,0 +1,8 @@
+runtime/*
+!runtime/.gitkeep
+.venv
+__pycache__/
+*.pyc
+assets/audio/
+.venv.backup-*/
+.DS_Store

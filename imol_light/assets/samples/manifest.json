@@ -1,0 +1,157 @@
+{
+  "description": "First channel, first 60 seconds of the original processed WAVs; lossless PCM16 FLAC. Matches the default SuperCollider buffer.",
+  "files": [
+    {
+      "wav": "a-protest-in-bogota-colombia.wav",
+      "flac": "a-protest-in-bogota-colombia.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "b22dbbaa0fafdacc7a4f6ddbe9d7c6f359574db9f236a093cba8792b95381791"
+    },
+    {
+      "wav": "acoustic-mordor-malaga.wav",
+      "flac": "acoustic-mordor-malaga.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "db633157c57093e16b6837cba65ccc537931ce92c85cee9f51fd70b536613cb9"
+    },
+    {
+      "wav": "anti-austerity-protest-athens-greece.wav",
+      "flac": "anti-austerity-protest-athens-greece.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "b91348513735441f6bc203ccb2fb161d5ff865195403bbfd0323c2a92d7174f6"
+    },
+    {
+      "wav": "call-and-response-occupy-la.wav",
+      "flac": "call-and-response-occupy-la.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "991b701f64a20734582d528943c9ef60d7ddff56164bd54b3c1e80a66133a59e"
+    },
+    {
+      "wav": "cinema-is-truth-24-times-a-second.wav",
+      "flac": "cinema-is-truth-24-times-a-second.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "214e4827dbd2629550f2d5b98807a405fc0cdb7b8b638ce2db36edae95e40696"
+    },
+    {
+      "wav": "democracia-new-york.wav",
+      "flac": "democracia-new-york.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "15b2aab4b5c1b6b3c2bd347508bcf9f2931027f3e37811654c913ebc253d187e"
+    },
+    {
+      "wav": "edinburgh-climate-protests-the-mound.wav",
+      "flac": "edinburgh-climate-protests-the-mound.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "b9081f672dda6e0513e542256e531838ed00aa538310114410398a5d970ec7ef"
+    },
+    {
+      "wav": "kill-the-bill-protest-parliament-square.wav",
+      "flac": "kill-the-bill-protest-parliament-square.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "4a917d80a65f4271ee8c431858bced7ca769cc531185a98c6a2a41f17eb20bc2"
+    },
+    {
+      "wav": "manifestants-parade-bogota.wav",
+      "flac": "manifestants-parade-bogota.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "d937a5832325776dbec3a6243102b7715763094a2060875056c43fb9cfea1107"
+    },
+    {
+      "wav": "not-my-president.wav",
+      "flac": "not-my-president.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "8203e4c765b00aa0342734de7ab5736c50b107072149244949fab887b44276bc"
+    },
+    {
+      "wav": "on-with-the-struggle-istanbul.wav",
+      "flac": "on-with-the-struggle-istanbul.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "a174e4557e780df62dc0da7a9f4a9f777ea6b66dfc9860c26a3df5e5f29ea35a"
+    },
+    {
+      "wav": "protest-in-tahrir-square-cairo.wav",
+      "flac": "protest-in-tahrir-square-cairo.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "9d13a39ed25f38e0b431e8791d000e6162268efd77831d41117d97d44e2c2137"
+    },
+    {
+      "wav": "protest-resolution.wav",
+      "flac": "protest-resolution.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "78abb576ee26e86a9a8f782e346bd820ebd05445f5cb99cd976f8177449a2937"
+    },
+    {
+      "wav": "rhythms-of-protest-paris.wav",
+      "flac": "rhythms-of-protest-paris.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "7cff5e9320fbde8a3007f6fcea5b15b16dcc8aa5d813479338848e253558ba72"
+    },
+    {
+      "wav": "serbian-protest.wav",
+      "flac": "serbian-protest.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "00974cad3200a9f6a73600f5ae4b0f53f9b9111fa2b4d7add55154bacdfa180c"
+    },
+    {
+      "wav": "subterranean-protest-malaga.wav",
+      "flac": "subterranean-protest-malaga.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "46ac7e2a401f72fdc2cc7cc2110e76d66c8a94195ede0a422aa90f260674ebd5"
+    },
+    {
+      "wav": "the-last-1-000-metres-madrid.wav",
+      "flac": "the-last-1-000-metres-madrid.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "fb15673f74ca6ffe4e894879fe0c801910c799e31b96bbcd9870f2233111ad05"
+    },
+    {
+      "wav": "the-last-900-metres-madrid.wav",
+      "flac": "the-last-900-metres-madrid.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "5cbe3b2559a236e4c16096f88f4d3a1882a3a865f98815eb90fa12aef39d7ea5"
+    },
+    {
+      "wav": "the-value-of-noise.wav",
+      "flac": "the-value-of-noise.flac",
+      "frames": 2880000,
+      "sample_rate": 48000,
+      "channels": 1,
+      "sha256": "f169fcc2fea46b55594e83cbe0ea5b64a7070c7f7e08fc2328a622de9fa5ad91"
+    }
+  ]
+}

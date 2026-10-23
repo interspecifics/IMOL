@@ -1,0 +1,280 @@
+IMOL LIGHT — INSTALACIÓN Y USO EN UBUNTU
+Cámara, graphic score y cuatro voces de SuperCollider
+
+Instalador para Ubuntu Desktop 22.04, 24.04 y 26.04 LTS de 64 bits (Intel/AMD).
+La instalación manual descrita más abajo corresponde a 24.04 con PipeWire.
+Usar el Python 3 del sistema. El instalador se detiene antes de instalar si
+detecta otra versión, otra distribución o una arquitectura distinta.
+Se necesita internet para instalar y una cámara compatible con Linux.
+No se necesita Max, OLA ni DMX.
+
+INSTALACIÓN AUTOMÁTICA
+
+Primero clonar la rama como indica el paso 1. Después abrir Terminal dentro de
+imol_light y ejecutar, SIN sudo:
+
+  bash install_ubuntu.sh
+
+Solicita la contraseña de administrador para instalar los paquetes Ubuntu.
+Detecta la versión y utiliza el Python del sistema, habilita universe, instala
+SuperCollider y las bibliotecas de audio, cámara y ventanas, crea .venv e
+instala las dependencias Python con una sola variante de OpenCV (headless).
+También genera los WAV desde el banco FLAC incluido.
+No hace falta ejecutar después los pasos de instalación manual 2 y 3.
+
+• Ubuntu 24.04/26.04: prepara PipeWire y su compatibilidad con JACK.
+• Ubuntu 22.04: prepara JACK y QjackCtl. Si JACK aún no está configurado,
+  abrir QjackCtl, entrar en Setup/Configuración, seleccionar el controlador
+  ALSA y la interfaz de audio, aplicar y pulsar Start/Iniciar. Si la tarjeta
+  está ocupada por el audio del escritorio, usar una interfaz USB dedicada o
+  resolver su uso compartido antes de continuar; el instalador no reemplaza
+  automáticamente el audio del escritorio. Revisar los mensajes de QjackCtl
+  si pide permisos de tiempo real. Seguir también el paso 8.
+
+Si ya hay un JACK activo o una elección guardada de una instalación anterior,
+el modo automático la conserva. Se puede elegir explícitamente:
+
+  bash install_ubuntu.sh --audio jack
+  bash install_ubuntu.sh --audio pipewire
+
+La segunda opción requiere 24.04 o 26.04. Para ver el plan sin cambiar nada:
+
+  bash install_ubuntu.sh --dry-run
+
+El instalador puede repetirse. Reutiliza un entorno Python compatible y guarda
+los incompatibles (por ejemplo, copiados del Mac) como .venv.backup-FECHA.
+No borra grabaciones, parciales ni ajustes de SuperCollider. Guarda registros
+ubuntu-install-FECHA.log y la selección de audio dentro de runtime.
+Si apt necesita quitar paquetes existentes para resolver un conflicto, se
+detiene y muestra el error. Si no hay paquetes Python precompilados compatibles,
+también se detiene; no intenta compilar bibliotecas grandes desde cero.
+
+Al terminar indica qué comprobaciones quedan pendientes: archivos WAV, sesión
+gráfica, servicio de audio o conexión/permisos de cámara. Código de salida:
+0 = comprobaciones automáticas correctas; 2 = software instalado con pendientes;
+1 = error de instalación. Incluso con código 0 falta la prueba física del paso 6.
+
+Arranque habitual, desde imol_light:
+
+  bash start_imol_light.sh
+
+El lanzador utiliza el modo de audio guardado y acepta las opciones habituales:
+
+  bash start_imol_light.sh --check
+  bash start_imol_light.sh --audio-folder assets/archives --display 0
+  bash start_imol_light.sh --camera-auto-disable --camera-index 0 --camera-rotate 0
+
+Sin --audio-folder, el score usa assets/archives si esa carpeta existe.
+Para cambiar el modo de audio solo durante una sesión:
+
+  IMOL_AUDIO_BACKEND=jack bash start_imol_light.sh
+
+Elegir la salida en Configuración → Sonido y hacer las pruebas del paso 6.
+No se abre la cámara ni se genera sonido durante la instalación.
+El instalador ha pasado pruebas con servicios simulados; la instalación real
+en Ubuntu sigue pendiente de validación en el equipo de destino.
+
+1. DESCARGAR EL PROYECTO
+
+  git clone --branch imol-light --single-branch https://github.com/interspecifics/IMOL.git IMOL
+  cd IMOL/imol_light
+
+La rama incluye los 19 MP3 completos, metadatos, banco FLAC de muestras y
+parciales. No se necesita otra copia de IMOL ni Max. No copiar .venv del Mac.
+El banco contiene el primer canal y hasta 60 segundos de cada WAV original,
+que es el límite predeterminado de lectura del motor. Para muestras más largas
+se necesitan WAV completos adicionales. El score usa los MP3 completos.
+
+2. INSTALAR LOS PROGRAMAS — SOLO LA PRIMERA VEZ
+
+Abrir Terminal (Ctrl+Alt+T) y ejecutar estas líneas una por una:
+
+  sudo apt update
+  sudo apt install software-properties-common
+  sudo add-apt-repository -y universe
+  sudo apt update
+  sudo apt install python3 python3-venv python3-pip supercollider
+  sudo apt install pipewire-jack pipewire-bin wireplumber qpwgraph
+  sudo apt install libsndfile1 ffmpeg v4l-utils
+  sudo apt install libgl1 libegl1 libxkbcommon-x11-0 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0 libxcb-xinerama0 libxcb-render-util0
+
+Si la instalación pregunta por permisos de tiempo real para jackd, esta ruta
+con PipeWire no requiere habilitarlos ni añadir el usuario al grupo audio.
+No hace falta iniciar jackd o QjackCtl para seguir los pasos principales.
+
+Comprobar que están disponibles:
+
+  python3 --version
+  sclang -v
+  command -v pw-jack
+
+El paquete de Ubuntu 24.04 proporciona SuperCollider 3.13. La versión del Mac
+puede ser distinta; no copiar su aplicación ni sus ejecutables a Ubuntu.
+
+3. CREAR EL ENTORNO PYTHON
+
+Entrar en la carpeta copiada; si se guardó en otro lugar, adaptar la ruta:
+
+  cd "$HOME/IMOL/imol_light"
+  mkdir -p runtime
+  python3 -m venv .venv
+  .venv/bin/python -m pip install --upgrade pip
+  .venv/bin/python -m pip install -r requirements.txt
+
+En Ubuntu, usar OpenCV sin sus propias ventanas para evitar conflictos entre
+su Qt y el Qt de PySide6. El score conserva su interfaz y el acceso a cámara:
+
+  .venv/bin/python -m pip uninstall -y opencv-python opencv-contrib-python opencv-python-headless opencv-contrib-python-headless
+  .venv/bin/python -m pip install opencv-contrib-python-headless
+  .venv/bin/python -m pip check
+  .venv/bin/python tools/prepare_audio.py
+
+Mantener instalada solo una variante de OpenCV. Si se vuelve a instalar
+requirements.txt, repetir las tres líneas anteriores. No usar sudo con pip.
+
+4. PREPARAR EL AUDIO
+
+Conectar la interfaz de audio o los altavoces y elegir la salida en
+Configuración → Sonido. Empezar con un volumen bajo.
+
+Comprobar el servicio de audio de la sesión:
+
+  systemctl --user is-active pipewire wireplumber
+  wpctl status
+
+Los dos servicios deben indicar «active» y debe aparecer una salida de audio.
+Si alguno está inactivo, iniciarlo y repetir la comprobación:
+
+  systemctl --user start pipewire wireplumber
+
+SuperCollider en Linux usa JACK. El prefijo pw-jack de los comandos siguientes
+lo conecta a PipeWire; no hay que arrancar un segundo servidor JACK.
+Dejar device: nil en sound/supercollider/config.scd. En Linux ese parámetro no
+selecciona la tarjeta física: la salida se elige en el sistema y en el ruteo
+de audio. Si el equipo ya tiene una configuración JACK propia, ver el paso 8.
+
+5. COMPROBAR Y ARRANCAR
+
+Desde imol_light, comprobar dependencias, SuperCollider y los WAV:
+
+  .venv/bin/python tools/launch.py --check
+
+«OK» confirma esas comprobaciones, pero no prueba las ventanas, la cámara,
+los archivos de parciales ni la salida de audio. Para iniciar la sesión:
+
+  pw-jack .venv/bin/python tools/launch.py --audio-folder assets/archives --display 0
+
+Esperar el aprendizaje inicial de cámara y el análisis del audio. Se abrirán
+el score y el monitor de sonido. No es necesario abrir manualmente los archivos
+de SuperCollider. La sesión debe iniciarse desde el escritorio, sin sudo.
+
+Los MP3 completos y sus metadatos están incluidos; también pueden indicarse con:
+
+  pw-jack .venv/bin/python tools/launch.py --audio-folder assets/archives --display 0
+
+--audio-folder cambia la carpeta que lee el score. La carpeta WAV del motor
+sonoro se configura por separado en sound/supercollider/config.scd;
+audioFolder debe seguir apuntando a assets/audio en esta estructura.
+
+6. USAR, VERIFICAR Y DETENER
+
+• Confirmar que la cámara muestra imagen y detecta regiones al mover un objeto.
+• Cargar una grabación y comprobar en el monitor que cambian su nombre y sus
+  parciales. Si un audio nuevo no tiene parciales, el score genera una aproximación.
+• Confirmar movimiento de los medidores y sonido por la salida elegida.
+• Reflection responde a posición, brillo, tamaño y velocidad de la región
+  de mayor área; se desvanece cuando desaparece la detección.
+• Play recorre el análisis visual; no es el interruptor general del sonido.
+• «Monitor audio» vuelve a abrir el monitor. Para escuchar el granulador aislado,
+  usar Solo en Granular y comparar Con efectos/SECO.
+• Cerrar la ventana del score o pulsar Ctrl+C en Terminal para terminar.
+
+Para cada sesión nueva basta con entrar en imol_light y repetir el comando
+de arranque del paso 5. No hace falta reinstalar las dependencias.
+
+7. SOLUCIONES RÁPIDAS
+
+• Faltan archivos WAV / «Missing … WAV files»:
+  Revisar los 19 WAV, sus nombres exactos y la estructura del paso 1. Linux
+  distingue mayúsculas de minúsculas. Revisar audioFolder en config.scd.
+
+• Cámara equivocada o imagen negra:
+  Cerrar otras aplicaciones que usen la cámara. Ver dispositivos disponibles:
+
+    v4l2-ctl --list-devices
+
+  Añadir al comando de arranque: --camera-auto-disable --camera-index 0
+  Probar otro índice si corresponde. Una cámara puede exponer varios nodos
+  /dev/video; no todos sirven para capturar imagen. Si aparece «Permission
+  denied», revisar el acceso del usuario a ese dispositivo. Solo si falta acceso:
+
+    sudo usermod -aG video "$USER"
+
+  Cerrar sesión y volver a entrar antes de probar de nuevo.
+
+• Imagen girada: añadir --camera-rotate 0 al comando de arranque.
+
+• Medidores activos pero no se oye:
+  Revisar volumen, salida del sistema, master y Solo/Mute del monitor.
+  Abrir qpwgraph desde el menú de aplicaciones. Con IMOL en ejecución, conectar
+  las dos salidas de SuperCollider/scsynth a reproducción izquierda/derecha de
+  la interfaz deseada. No conectarlas a entradas de micrófono. Reiniciar IMOL
+  después de cambiar de interfaz si las conexiones no se recuperan.
+
+• SuperCollider no inicia / «Cannot connect to server socket» / espera agotada:
+  Comprobar el paso 4 y que el comando empieza por pw-jack. Consultar:
+
+    tail -n 80 runtime/supercollider.log
+
+• Error Qt, «xcb» o ventana que no abre con Wayland:
+  Revisar las bibliotecas del paso 2 y la sustitución de OpenCV del paso 3.
+  Probar en la sesión gráfica de Ubuntu con XWayland:
+
+    QT_QPA_PLATFORM=xcb pw-jack .venv/bin/python tools/launch.py --audio-folder assets/archives --display 0
+
+  Si persiste, obtener el detalle del complemento que falla:
+
+    QT_DEBUG_PLUGINS=1 QT_QPA_PLATFORM=xcb pw-jack .venv/bin/python tools/launch.py --audio-folder assets/archives --display 0
+
+  Revisar también runtime/supercollider.log. No usar QT_QPA_PLATFORM=offscreen
+  para una sesión normal: impediría ver las ventanas.
+
+• Puerto ocupado / «Address already in use»:
+  Cerrar otras sesiones de IMOL y patches Max que escuchen en OSC 9001.
+  El servidor de audio de IMOL también necesita libre el puerto UDP 57130.
+
+• SuperCollider no encontrado:
+  Comprobar command -v sclang. Si está instalado en otra ruta, añadir
+  --sclang /ruta/completa/sclang al comando de arranque.
+
+8. SI EL EQUIPO YA USA JACK EN LUGAR DE PIPEWIRE
+
+Usar esta alternativa solo en un equipo configurado con un servidor JACK real.
+Iniciar JACK con su configuración habitual y seleccionar allí la interfaz,
+frecuencia de muestreo y búfer. Ejecutar sin pw-jack:
+
+  .venv/bin/python tools/launch.py --audio-folder assets/archives --display 0
+
+Conectar las salidas de SuperCollider a system:playback_1 y system:playback_2
+en el panel de conexiones de JACK. No ejecutar simultáneamente ambos métodos
+intentando controlar la misma tarjeta de sonido.
+
+ALCANCE Y REFERENCIAS
+
+Guía contrastada con el lanzador y la configuración actuales de IMOL Light.
+No se ha ejecutado una instalación real en Ubuntu desde este equipo Mac.
+La validación final requiere completar el paso 6 en el equipo de destino.
+Las dependencias Python no están fijadas a versiones: una instalación futura
+puede resolver versiones diferentes y debe volver a comprobarse.
+
+Fuentes oficiales consultadas para los pasos específicos de Linux:
+• SuperCollider en Ubuntu 24.04:
+  https://packages.ubuntu.com/noble/supercollider
+• Audio de SuperCollider en Linux/JACK:
+  https://doc.sccode.org/Reference/AudioDeviceSelection.html
+• Puente JACK de PipeWire (pw-jack):
+  https://docs.pipewire.org/page_man_pw-jack_1.html
+• OpenCV sin ventanas propias, para interfaces creadas con otra biblioteca:
+  https://pypi.org/project/opencv-contrib-python-headless/
+• Dependencias de Qt en Linux:
+  https://doc.qt.io/qtforpython-6.11/overviews/qtdoc-linux-requirements.html
