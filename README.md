@@ -1,28 +1,37 @@
 # IMOL Light
 
-Cámara, graphic score y cuatro voces de SuperCollider: espectral, granular
-ambient, multicanal y Reflection ambient. Incluye monitor OSC, medidores de
-audio y controles Solo/Mute. Esta rama contiene únicamente la versión Light,
-sin control de iluminación, DMX, motores ni niebla.
+Graphic score con cámara y cuatro voces de SuperCollider.
 
-## Descargar esta versión
+## Instalación
+
+### Descargar
 
 ```sh
 git clone --branch imol-light --single-branch https://github.com/interspecifics/IMOL.git IMOL
 cd IMOL/imol_light
 ```
 
-La descarga incluye el código, las dependencias declaradas, 19 grabaciones MP3
-completas con sus metadatos, 19 muestras comprimidas sin pérdida y los parciales
-de todas las grabaciones. No requiere Max ni otra copia del proyecto IMOL.
-Los programas externos y las dependencias Python se instalan en cada equipo.
+Conectar la cámara y los altavoces antes de iniciar el programa.
 
-## Instalar en macOS
+### Ubuntu
 
-1. Instalar [Python 3.13](https://www.python.org/downloads/macos/) y
-   [SuperCollider](https://supercollider.github.io/downloads).
-   Colocar SuperCollider en `/Applications`.
-2. Desde la carpeta `imol_light`, ejecutar:
+Desde una terminal del escritorio de Ubuntu Desktop 22.04, 24.04 o 26.04 LTS,
+Intel/AMD de 64 bits:
+
+```sh
+bash install_ubuntu.sh
+bash start_imol_light.sh
+```
+
+Ejecutar sin sudo. El instalador solicita la contraseña cuando la necesita.
+En Ubuntu 22.04, configurar la interfaz e iniciar JACK en QjackCtl antes de
+abrir IMOL. En Ubuntu 24.04 y 26.04 se utiliza PipeWire.
+
+### macOS
+
+Instalar [Python 3.13](https://www.python.org/downloads/macos/) y
+[SuperCollider](https://supercollider.github.io/downloads). Colocar SuperCollider
+en `/Applications`. Desde la carpeta `imol_light`:
 
 ```sh
 python3.13 -m venv .venv
@@ -32,96 +41,101 @@ python3.13 -m venv .venv
 .venv/bin/python tools/launch.py --check
 ```
 
-3. Conectar la cámara, elegir la salida de audio del sistema e iniciar:
+Abrir `start_imol_light.command` o ejecutar:
 
 ```sh
 .venv/bin/python tools/launch.py --display 0
 ```
 
-Aceptar el permiso de cámara. En adelante también se puede abrir
-`start_imol_light.command`. El monitor se abre junto al motor sonoro.
-
-## Instalar en Ubuntu
-
-Desde `imol_light`, en Ubuntu Desktop 22.04, 24.04 o 26.04 LTS, Intel/AMD de 64 bits:
-
-```sh
-bash install_ubuntu.sh
-bash start_imol_light.sh
-```
-
-Ejecutar sin sudo: el instalador solicita la contraseña cuando la necesita.
-Instala SuperCollider, prepara Python y convierte las muestras incluidas a WAV.
-Usa PipeWire en 24.04/26.04 y JACK en 22.04; si JACK no está configurado,
-seleccionar la interfaz y arrancarlo en QjackCtl antes de iniciar IMOL.
-Consultar la [guía Ubuntu](imol_light/INSTALACION_UBUNTU_ES.txt) para detalles.
-La instalación Ubuntu tiene pruebas simuladas; falta validarla en un equipo real.
+Aceptar el permiso de acceso a la cámara.
 
 ## Inicio automático en Ubuntu
 
-Desde `imol_light`, ejecutar sin sudo `bash install_autostart_ubuntu.sh`.
-Al entrar al escritorio arranca el sonido y el score con cámara, a pantalla
-completa y con prioridad sobre las ventanas normales. **F10** libera o restaura
-la prioridad para acceder al monitor. Para arrancar tras encender el equipo sin
-intervención, activar también el inicio de sesión automático en Ubuntu.
-Consultar la [guía de inicio automático](imol_light/AUTOINICIO_UBUNTU_ES.txt)
-para la instalación en `/home/i/code/IMOL-light`, selección de pantalla,
-registros, limitaciones de Wayland y desactivación.
+Desde la carpeta `imol_light`, ejecutar una vez, sin sudo:
 
-## Audio incluido
+```sh
+bash install_autostart_ubuntu.sh
+```
 
-- `assets/archives/`: las grabaciones completas en MP3 y sus metadatos RTF,
-  usados por el score. Se conservan los créditos de las grabaciones.
-- `assets/samples/`: primeros 60 segundos del primer canal de cada WAV original,
-  en FLAC sin pérdida. Es exactamente el segmento que carga el motor con su
-  configuración predeterminada.
-- `assets/audio/`: WAV generados localmente por `tools/prepare_audio.py`.
-  El preparador verifica las muestras y conserva cualquier WAV ya existente.
-- `sound/data/partials/`: seis bancos de 83 parciales por grabación.
+IMOL se inicia al entrar al escritorio. Para arrancar al encender el equipo sin
+intervención, activar el inicio de sesión automático en Configuración → Usuarios.
+Configurar la suspensión y el bloqueo de pantalla según el uso de la instalación.
 
-Los WAV generados, entornos virtuales y registros quedan fuera de Git. El banco
-incluido tiene un máximo de 60 segundos por muestra: subir `sampleSeconds` no
-añade material. Para usar muestras más largas hay que aportar WAV completos.
-El score sí analiza los MP3 completos. No se necesita Git LFS.
+Para probar el inicio desde una terminal del escritorio, con IMOL cerrado:
 
-## Uso y cierre
+```sh
+bash install_autostart_ubuntu.sh --run
+```
 
-El audio cargado en el score selecciona sus parciales. Los estados y la cámara
-controlan las capas. **Play** recorre el análisis visual; el sonido puede seguir
-activo mientras el score está en pausa. En el monitor, usar **Solo** para
-escuchar una voz y **SECO** para comparar sin efectos.
+Para seleccionar otra pantalla, reinstalar con `--display 1`. Para desactivar
+futuros inicios, ejecutar `bash install_autostart_ubuntu.sh --remove`.
 
-En **Salida general**, **Nivel** controla el volumen de 0 a 1 (0 silencia todo)
-y **dB salida** compensa el nivel de la mezcla ambient, de 0 a +30 dB. El valor
-inicial es **0.30 / +24 dB**, con limitador después de la ganancia. La compensación
-mantiene las pausas y texturas; no aumenta la densidad de las voces. El medidor
-de Salida general mide después de estos controles y del limitador; los medidores
-de cada voz se mantienen antes del volumen general. Los valores numéricos L/R
-son picos en dBFS y las barras muestran RMS.
+Las actualizaciones y consultas de registros pueden hacerse por SSH. El arranque
+con `--run` necesita el entorno de la sesión gráfica del equipo.
 
-Los cambios del monitor son temporales. Para conservarlos al reiniciar, editar
-`master` y `outputGainDb` en `imol_light/sound/supercollider/config.scd`.
-También se pueden ajustar durante la ejecución con OSC `/imol/master` (0..1)
-y `/imol/outputGainDb` (0..30). Tras actualizar esta versión hay que cerrar y
-volver a iniciar IMOL para cargar la nueva etapa de salida.
+## Funcionamiento
 
-Cerrar el score o pulsar **Ctrl+C** en el terminal detiene la sesión. Para usar
-el IDE de SuperCollider, abrir `sound/supercollider/main.scd` y ejecutar el
-archivo completo. Detener con `~imolStop.value;`, esperar un segundo y volver
-a ejecutar el archivo completo para cargar cambios. No iniciar simultáneamente
-el motor desde el IDE y desde el lanzador.
+El score carga las grabaciones de `assets/archives` y sus metadatos. El audio
+seleccionado determina los parciales de la voz espectral. La cámara controla
+la evolución de las voces. Esperar a que termine el aprendizaje del fondo.
 
-## Solución rápida de problemas
+- **Play/Pause:** inicia o pausa el recorrido del análisis visual. Pausar el
+  score no silencia necesariamente las voces.
+- **F10:** libera o restaura la prioridad de pantalla para acceder a otras ventanas.
+- **Monitor audio:** muestra la recepción OSC, los medidores y los controles de sonido.
+- **Solo / Mute:** permite escuchar una voz por separado o silenciarla.
+- **Con efectos / SECO:** permite escuchar las voces con o sin sus efectos externos.
+- **Salida general:** controla el volumen de la mezcla mediante **Nivel** y
+  **dB salida**. Un nivel de cero silencia la salida. Ajustar el volumen final
+  de escucha desde la bocina.
 
-- WAV ausentes: ejecutar `.venv/bin/python tools/prepare_audio.py`.
-- Cámara incorrecta: añadir `--camera-auto-disable --camera-index 0`; probar
-  otro índice si hace falta. Imagen girada: añadir `--camera-rotate 0`.
-- Puerto ocupado: cerrar sesiones que utilicen OSC 9001 o el servidor 57130.
-- Sin sonido: revisar la salida del sistema, los medidores y Solo/Mute.
-  Consultar `runtime/supercollider.log` si el motor no arranca.
+Los controles del monitor son temporales. Para guardar el volumen de arranque,
+editar `master` y `outputGainDb` en `sound/supercollider/config.scd` y reiniciar IMOL.
 
-La comprobación `--check` no activa cámara ni sonido. La validación física del
-equipo de destino se hace después, con cámara y escucha.
+Cerrar el score o pulsar **Ctrl+C** en la terminal que lo inició detiene el
+programa y el sonido. Cerrar solo el monitor no detiene la sesión.
 
-Más detalles: [guía macOS](imol_light/INSTALACION_ES.txt),
-[documentación y pruebas](imol_light/README.md).
+## Cámara y pantalla
+
+En Ubuntu, consultar las cámaras disponibles con `v4l2-ctl --list-devices`.
+Para elegir una cámara y una pantalla al iniciar manualmente:
+
+```sh
+bash start_imol_light.sh --camera-auto-disable --camera-index 0 --display 0
+```
+
+Cambiar los índices según los dispositivos disponibles. Añadir `--camera-rotate 0`
+si no se necesita girar la imagen. Conectar el proyector antes de iniciar la sesión.
+Si el escritorio ignora la prioridad de ventana, usar una sesión X11/Xorg cuando
+esté disponible.
+
+## Comprobación y registros
+
+Desde la carpeta `imol_light`, en Ubuntu:
+
+```sh
+bash start_imol_light.sh --check
+tail -n 100 runtime/autostart.log runtime/supercollider.log
+```
+
+`--check` revisa dependencias y archivos sin activar cámara ni sonido.
+`autostart.log` contiene los mensajes del inicio automático y del score;
+`supercollider.log`, los del motor de sonido. Para regenerar los WAV incluidos:
+
+```sh
+.venv/bin/python tools/prepare_audio.py
+```
+
+Si no hay sonido, revisar **Salida general**, Solo/Mute y la salida seleccionada
+en Ubuntu o macOS. Si la cámara no aparece, comprobar su conexión y el dispositivo
+seleccionado. Cerrar cualquier sesión anterior de IMOL antes de iniciar otra.
+
+## Actualizar
+
+Desde la carpeta del repositorio:
+
+```sh
+git pull --ff-only origin imol-light
+```
+
+Cerrar y volver a iniciar IMOL para usar la versión descargada.

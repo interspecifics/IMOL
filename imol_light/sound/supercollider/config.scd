@@ -6,7 +6,7 @@
     device: nil,
     outputChannels: 2,
     outputBus: 0,
-    master: 0.30,
+    master: 0.60,
     outputGainDb: 24, // Compensate the quiet ambient mix before the output limiter (0..30 dB).
     spectralLevel: 0.10,
     granularLevel: 0.14,
