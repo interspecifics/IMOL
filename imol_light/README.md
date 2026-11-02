@@ -124,8 +124,9 @@ completos permiten el análisis íntegro del score. Para usar WAV más largos,
 aportarlos con los mismos nombres en `assets/audio` y ajustar `sampleSeconds`.
 Subir ese valor por sí solo no amplía el material incluido.
 
-Los cambios de muestra liberan la voz anterior suavemente: 2,5 s en Granular
-y 0,6 s en Multicanal. No se precarga toda la colección. El audio del score
+Los cambios de muestra liberan la voz anterior durante 5 s. Cada selección
+debe estabilizarse durante 1,5 s y las muestras permanecen al menos 12 s antes
+de sustituirse; los cambios intermedios se descartan. No se precarga toda la colección. El audio del score
 selecciona sus propios parciales; el cursor no sincroniza sus trayectorias,
 pues los cambios de banco siguen los estados de cámara.
 
@@ -164,11 +165,11 @@ también los parciales nuevos: el envío OSC transmite la identidad, no los dato
 
 | Capa | Implementación v0.1 | Diferencias conocidas respecto a Max |
 |---|---|---|
-| Espectral | 83 osciladores con serie triangular truncada; seis bancos por audio seleccionado; máscara suave aleatoria | Resúmenes de parciales originales o picos FFT cuando falta análisis. No reproduce todavía las trayectorias temporales, la máscara simplex, las tres ramas de efectos ni las ráfagas/barridos exactos. |
+| Espectral | 83 osciladores sinusoidales con segundo armónico tenue; seis bancos por audio, máscara lenta y filtro oscuro | Resúmenes de parciales originales o picos FFT cuando falta análisis. No reproduce todavía las trayectorias temporales, la máscara simplex, las tres ramas de efectos ni las ráfagas/barridos exactos. |
 | Granular | Textura ambient/minimal con `GrainBuf`, ventana Hann, granos largos y espaciados, lectura lenta, filtro suave y paneo lento; máximo de 16 granos | Reinterpreta los presets de Max. Conserva su selección de muestras; la densidad, duración y lectura usan el nuevo mapeo ambient. |
-| Multicanal | Diez lectores de buffer con velocidades y paneos independientes | No incluye el timestretch de `groove~`, la división en tres bandas ni la red Gen exacta. La transposición modifica también la velocidad. |
-| Reflection | Versión ambient de `resonantReflection`: excitación suave, cinco resonadores, dos osciladores agudos y reverberación | Zonas pentatónicas, transiciones lentas y deriva interna; respuesta menos literal a la cámara. Usa cinco controles sin RGB. |
-| Efectos | Delay estéreo con realimentación, filtro, chorus y cola para Espectral/Multicanal; reverberación difusa al 30% para Granular | El granulador evita los ecos rítmicos de la cadena original. No hay equivalencia tímbrica exacta con Gen/Abl. |
+| Multicanal | Cuatro lectores lentos, desfasados y con ventanas suaves en los bordes del loop; filtro y control de picos | No incluye el timestretch de `groove~`, la división en tres bandas ni la red Gen exacta. La transposición modifica también la velocidad. |
+| Reflection | Versión ambient de `resonantReflection`: excitación espaciada, siete resonancias de afinación fija y reverberación | La cámara cambia el peso de las notas, sin barrer su frecuencia; respuesta menos literal a la cámara. Usa cinco controles sin RGB. |
+| Efectos | Reverberación difusa y oscura: 40% Granular, 45% Espectral/Multicanal | Se eliminaron los ecos rítmicos y la realimentación; SECO sigue disponible. No hay equivalencia tímbrica exacta con Gen/Abl. |
 
 Se exportaron los **14 presets del sampler y los 21 de granulStrig**. Los datos
 originales están en `sound/data/max_presets.json`; `sound_data.scd` contiene una
@@ -193,6 +194,29 @@ Para sustituirlos deliberadamente por aproximaciones FFT de los MP3 completos:
 .venv/bin/python tools/prepare_sound_data.py --audio-folder assets/archives
 ```
 
+## Ajuste ambient de las cuatro voces
+
+Espectral atenúa la voz antes de cambiar frecuencias y la recupera suavemente,
+sin deslizar el tono entre bancos. Los cambios de banco de una misma grabación
+están separados por al menos 8 s. Una nueva grabación sigue seleccionando sus
+propios parciales de inmediato, con el fundido del sintetizador.
+
+Granular deja pausas más amplias, con control suave de picos. Multicanal usa
+cuatro capas desfasadas en vez de diez loops y suaviza los extremos de cada
+loop para evitar saltos al reiniciar. Reflection mantiene una armonía fija:
+el movimiento redistribuye intensidad en vez de cambiar directamente el tono.
+
+En `config.scd`, `spectralHoldSeconds`, `sampleHoldSeconds` y
+`sampleSettleSeconds` controlan el ritmo de los cambios. Los niveles iniciales
+son master 0,30, Espectral 0,10, Granular 0,14, Multicanal 0,10 y Reflection 0,10.
+Reiniciar el motor para cargar los cambios. Para valorar el timbre, usar Solo
+y comparar a un volumen de escucha similar; una reducción de volumen por sí
+sola no demuestra un carácter más ambient.
+
+La muestra `runtime/ambient_preview.wav` se genera con las pruebas de abajo y
+tiene una ganancia constante adicional para facilitar la escucha. Esa ganancia
+no cambia la configuración del motor.
+
 ## Voz Reflection
 
 Integra `IMOL_SC_RESREFLEC_SINTH1.scd`, aportado por Paloma Lopez, como una cuarta
@@ -208,10 +232,10 @@ en este orden, todos entre 0 y 1:
 | Control | Dato que envía el score | Efecto en la voz |
 |---|---|---|
 | Posición horizontal | Centro de la región / ancho de imagen | Paneo de resonadores: 0 izquierda, 1 derecha |
-| Posición vertical | 1 − centro vertical / alto de imagen | Siete zonas pentatónicas entre unos 110 y 262 Hz, con transición de 4 s: arriba más agudo |
-| Brillo | Intensidad media de la región, después de ajustes de imagen, / 255 | Curva cuadrática, filtro de 500 a 5000 Hz y osciladores agudos suaves |
+| Posición vertical | 1 − centro vertical / alto de imagen | Distribución de energía entre siete notas fijas de 65–262 Hz; transición de 7 s |
+| Brillo | Intensidad media de la región, después de ajustes de imagen, / 255 | Curva cuadrática, filtro de 500 a 2200 Hz y armónicos tenues |
 | Tamaño | Raíz cuadrada de la proporción entre área del contorno y área total de imagen | Amplitud de los resonadores; 0 indica ausencia y silencia toda la voz |
-| Velocidad | Distancia entre centros normalizados / segundos transcurridos, limitada a 1 | Curva cuadrática: de 0,15 a 3 excitaciones suaves por segundo, con envolventes largas |
+| Velocidad | Distancia entre centros normalizados / segundos transcurridos, limitada a 1 | Curva cuadrática: de 0,05 a 0,35 excitaciones suaves por segundo, con envolventes largas |
 
 Se utiliza la región de mayor área, la misma clasificación que el tracker A.
 Es una selección por tamaño, no un seguimiento persistente de identidad: si
@@ -222,14 +246,14 @@ desactivar el envío de trackers también desactiva este envío.
 
 La voz arranca silenciosa. Al desaparecer las detecciones se envía tamaño cero;
 si la cámara o el envío OSC se interrumpen, se desvanece tras tres segundos sin
-actualizaciones. Los controles se suavizan durante 2–4 s y la presencia durante
-2 s. La altura tiene una deriva lenta independiente de la cámara; las resonancias
-usan proporciones más consonantes, con reverberación estéreo. Se mantiene un
+actualizaciones. Los controles se suavizan durante 4–7 s y la presencia durante
+2 s. La armonía conserva su afinación mientras cambia el peso de cada nota,
+con reverberación estéreo. Se mantiene un
 único sintetizador y se recupera al volver la detección.
 Sale al mezclador general, con sus propios filtros y limitador, y se
 detiene con la sesión. No depende del audio ni del archivo de parciales.
 
-`reflectionLevel` (por defecto 0,18) y `reflectionTimeout` (3 s) están en
+`reflectionLevel` (por defecto 0,10) y `reflectionTimeout` (3 s) están en
 `config.scd`. El nivel también puede cambiarse durante la ejecución desde SC:
 
 ```supercollider
@@ -267,11 +291,11 @@ automática, guardar `monitor: false` en `config.scd` y reiniciar.
 Para investigar el granulador, pulsar **Solo** en Granular y alternar **Con
 efectos / SECO**. El estado seco se conserva aunque lleguen nuevos controles
 OSC. La versión ambient utiliza llegadas aleatorias con respiración lenta:
-el objetivo de densidad va de **0,35 a 1,8 granos/s**, modulado internamente
-entre el 35% y el 100% de ese valor; no es un pulso regular ni un conteo real.
-Los granos duran **0,45–1,8 s**, con ventana Hann y transiciones de 2–3 s.
-La lectura lenta (aproximadamente 0,44–0,93x) y un filtro de 800–3500 Hz suavizan
-el material. La reverberación difusa al 30% reemplaza el delay granular.
+el objetivo de densidad va de **0,2 a 1,1 granos/s**, modulado internamente
+entre el 4% y el 100% de ese valor; no es un pulso regular ni un conteo real.
+Los granos duran **0,8–1,8 s**, con ventana Hann y transiciones de 3–5 s.
+La lectura lenta (aproximadamente 0,44–0,74x) y un filtro de 750–2000 Hz suavizan
+el material. La reverberación difusa al 40% reemplaza el delay granular.
 
 El tracker E controla la voz cuando está disponible; hasta recibirlo, se usa A
 para responder también con una sola detección. X recorre la muestra cargada,
@@ -290,11 +314,11 @@ quieta con otra grande en movimiento durante al menos 10–15 segundos.
 |---|---|---|
 | `/score/audio` | string: identificador de grabación; vacío para silenciar | Carga sus propios bancos de parciales; no altera los samples de las otras capas |
 | `/reflection/1` | cinco valores: x, y, brillo, tamaño, velocidad | Control de la voz Reflection desde la región de mayor área |
-| `/system/state` | float | Velocidad de evolución espectral; cambia banco al cruzar entero o tras 25 eventos con delta ≥ 0,04 |
-| `/system/stateB` | float | Interpolación de escenas y selección de muestras |
-| `/track/A` | ocho valores | Delay, feedback y transposición multicanal; control granular hasta recibir E |
-| `/track/B` | ocho valores | Anchura y feedback de efectos; anchura granular |
-| `/track/C` | ocho valores | Amortiguamiento de los efectos con delay |
+| `/system/state` | float | Velocidad de evolución espectral; propone banco al cruzar entero o tras 25 eventos, con al menos 8 s entre cambios |
+| `/system/stateB` | float | Escenas y selección de muestras estabilizada (1,5 s) con permanencia mínima (12 s) |
+| `/track/A` | ocho valores | Timbre y lectura lenta de Granular/Multicanal hasta recibir E |
+| `/track/B` | ocho valores | Anchura granular |
+| `/track/C` | ocho valores | Amortiguamiento de la reverberación |
 | `/track/E` | ocho valores | Posición, densidad, duración y timbre granular ambient; velocidades y paneos multicanal |
 | `/imol/master` | float 0–1 | Nivel general |
 | `/imol/layer` | string + float 0–0,5 | Nivel de `spectral`, `granular`, `groove` o `reflection` |
@@ -307,8 +331,8 @@ Se mantienen los últimos valores cuando dejan de llegar detecciones. La tasa
 adaptativa puede dejar largos intervalos sin mensajes, sin implicar desconexión.
 
 Los mapeos son aproximados: C usa su coordenada vertical como amortiguamiento
-común; A usa área normalizada para una transposición de 0,5–2 y su altura para
-feedback. No se conserva el escalado casi nulo del área en el patch original.
+común. Granular usa área y movimiento con curvas suaves; Multicanal mantiene
+cuatro velocidades próximas y paneos lentos. No hay control de realimentación.
 Los trackers tienen prioridad sobre los parámetros de escena una vez recibidos.
 `/state/N`, `/vel/*` y `/feat/*` siguen disponibles desde el score pero no se usan
 en estas primeras capas. El botón Play del score recorre el análisis visual;
@@ -330,6 +354,9 @@ Probado con el entorno Python 3.9 existente y SuperCollider 3.14.1:
 - Selección por OSC de las 19 grabaciones, comandos de síntesis, evolución dentro
   de cada grabación, selección repetida, silencio ante errores y recuperación.
 - Render de 25 segundos sin altavoces, con señal finita y no silenciosa en las tres capas.
+- Mezcla ambient de 100 s con las cuatro voces aisladas: señal finita, niveles,
+  energía aguda, atenuación durante la afinación espectral y cierre sin colas pendientes.
+- Selección de muestras: permanencia mínima, estabilidad y cancelación al detener.
 - Granular ambient: mapeos E/A, modo seco y render de 72 s con pausas, contraste
   de actividad entre dos entradas del score, liberación de muestra y caída de reverberación.
 - OSC de Reflection: parámetros, rechazo de mensajes mal formados, límites y volumen.
@@ -348,6 +375,9 @@ sclang -D tests/check_audio_selection.scd
 sclang -D tests/check_reflection_osc.scd
 sclang -D tests/render_supercollider.scd
 .venv/bin/python tests/check_render.py
+sclang -D tests/check_ambient.scd
+sclang -D tests/render_ambient.scd
+.venv/bin/python tests/check_ambient_render.py
 sclang -D tests/check_granular.scd
 .venv/bin/python tests/check_granular_render.py --prepare
 sclang -D tests/render_granular.scd

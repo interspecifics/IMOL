@@ -42,12 +42,12 @@ state[\granularDescription] = {
         var controls = Dictionary.newFrom(state[\controls].value(\granular));
         var lo = controls[\durLo], hi = controls[\durHi];
         var density = controls[\density];
-        "Granular ambient: %-% granos/s | duracion %-% s | posicion % +/- % pct.\nLectura %-%x | filtro % Hz | reverb % | control % (objetivos; transicion 2-3 s)".format(
-            (density * 0.35).round(0.01), density.round(0.01), lo.round(0.01), hi.round(0.01),
+        "Granular ambient: %-% granos/s | duracion %-% s | posicion % +/- % pct.\nLectura %-%x | filtro % Hz | reverb % | control % (objetivos; transicion 3-5 s)".format(
+            (density * 0.04).round(0.01), density.round(0.01), lo.round(0.01), hi.round(0.01),
             (controls[\position] * 100).round(0.1), (controls[\spread] * 100).round(0.1),
             controls[\rateLo].min(controls[\rateHi]).round(0.01), controls[\rateLo].max(controls[\rateHi]).round(0.01),
             controls[\cutoff].round,
-            if(state[\dry].includes(\granular)) { "SECO" } { "30%" },
+            if(state[\dry].includes(\granular)) { "SECO" } { "40%" },
             if(state[\tracks][\E].notNil) { "tracker E" } {
                 if(state[\tracks][\A].notNil) { "tracker A" } { "escena" }
             })

@@ -37,8 +37,12 @@ Routine({
         // Evolution wraps within one recording, never crosses into another.
         target.sendMsg('/system/state', 1);
         0.08.wait;
+        target.sendMsg('/system/state', 2);
+        0.08.wait;
+        check.value(~imol[\bank] == 0, "Camera jitter bypassed the bank hold time");
         8.do { |i|
-            target.sendMsg('/system/state', (i % 2) + 2);
+            ~imol[\bankAppliedAt] = Main.elapsedTime - 9;
+            target.sendMsg('/system/state', (i % 2) + 3);
             0.08.wait;
             check.value(~imol[\bank] == ((i + 1) % 6), "Bank did not wrap within recording");
         };

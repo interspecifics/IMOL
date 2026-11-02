@@ -6,11 +6,14 @@
     device: nil,
     outputChannels: 2,
     outputBus: 0,
-    master: 0.35,
-    spectralLevel: 0.12,
-    granularLevel: 0.20,
-    grooveLevel: 0.15,
-    reflectionLevel: 0.18,
+    master: 0.30,
+    spectralLevel: 0.10,
+    granularLevel: 0.14,
+    grooveLevel: 0.10,
+    reflectionLevel: 0.10,
+    spectralHoldSeconds: 8, // Minimum time between banks of the same recording.
+    sampleHoldSeconds: 12, // Minimum time between sample replacements.
+    sampleSettleSeconds: 1.5, // A new sample selection must remain stable this long.
     reflectionTimeout: 3.0, // Fade when camera/OSC updates stop.
     monitor: true, // OSC reception, real audio meters, Solo/Mute and granular details.
     // Limit resident memory and avoid phase precision loss on very long files.

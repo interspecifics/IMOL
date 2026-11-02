@@ -19,20 +19,22 @@ var controls;
 ~imolDefs = ~imolDefs.select { |def| [\imolGranular, \imolEffects, \imolMaster].includes(def.name) };
 ~imolDefs = ~imolDefs.add(SynthDef(\granularDryTap, { Out.ar(2, In.ar(16, 2)) }));
 ~imolDefs.do { |def|
+    def = SynthDef(def.name, { RandSeed.ir(1, 1979); SynthDef.wrap(def.func) });
     def.writeDefFile(root +/+ "runtime");
     list.add([0, [\d_load, root +/+ "runtime" +/+ def.name ++ ".scsyndef"]]);
 };
 list.add([0, [\b_allocReadChannel, 0, sample, 0, 48000 * 60, 0]]);
 list.add([0.1, [\g_new, 100, 0, 0], [\g_new, 200, 3, 100], [\g_new, 300, 3, 200]]);
-list.add([0.2, [\s_new, \imolEffects, 201, 0, 200, \in, 16, \out, 18, \diffuse, 1, \wet, 0.3],
+list.add([0.2, [\s_new, \imolEffects, 201, 0, 200, \in, 16, \out, 18, \diffuse, 1, \wet, 0.4],
     [\s_new, \granularDryTap, 202, 1, 200],
     [\s_new, \imolMaster, 301, 0, 300, \in, 18, \amp, config[\master]]]);
 ~imol[\tracks][\A] = [0, 0.2, 0.5, 0.1, 0.1, 0, 0, 0];
 controls = ~imol[\controls].value(\granular);
 list.add([0.5, [\s_new, \imolGranular, 101, 0, 100, \out, 16, \buf, 0] ++ controls]);
 list.add([30, [\n_set, 101, \gate, 0]]);
-// Freeing the old buffer at 33 s also exercises the longer source release.
-list.add([33, [\b_free, 0], [\b_allocReadChannel, 1, sample, 0, 48000 * 60, 0]]);
+// Retain the old buffer beyond the five-second release.
+list.add([33, [\b_allocReadChannel, 1, sample, 0, 48000 * 60, 0]]);
+list.add([36, [\b_free, 0]]);
 ~imol[\tracks][\A] = [0, 0.7, 0.5, 0.8, 0.8, 0.25, 0.25, 0];
 controls = ~imol[\controls].value(\granular);
 list.add([33.5, [\s_new, \imolGranular, 102, 0, 100, \out, 16, \buf, 1] ++ controls]);

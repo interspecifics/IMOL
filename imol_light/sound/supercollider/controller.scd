@@ -37,7 +37,7 @@ state[\setLevel] = { |kind, level|
 state[\setDry] = { |kind, enabled|
     if(enabled) { state[\dry].add(kind) } { state[\dry].remove(kind) };
     if(kind == \spectral) {
-        if(state[\spectralFx].notNil) { state[\spectralFx].set(\wet, if(enabled) { 0 } { 0.35 }) };
+        if(state[\spectralFx].notNil) { state[\spectralFx].set(\wet, if(enabled) { 0 } { 0.45 }) };
     } { state[\updateLayer].value(kind) };
 };
 
@@ -138,25 +138,26 @@ state[\controls] = { |kind|
     if(kind == \granular) {
         var track = e ? a;
         var scene = ((state[\sceneValue] ? 1) - 1).linlin(0, 13, 0, 1);
-        var size = if(track.isNil) { 0.25 } { (track[5].sqrt * 2).clip(0, 1) };
-        var motion = if(track.isNil) { 0 } { ((track[6].squared + track[7].squared).sqrt * 4).clip(0, 1) };
+        var size = if(track.isNil) { 0.25 } { (track[5] * 4).clip(0, 1) };
+        var motion = if(track.isNil) { 0 } { ((track[6].squared + track[7].squared) * 16).clip(0, 1) };
         var y = if(track.isNil) { scene } { track[2] };
-        var rate = y.linexp(0, 1, 0.45, 0.9);
+        var rate = y.round(0.25).linexp(0, 1, 0.45, 0.72);
         // Keep archived Max scenes intact; reinterpret only the live granular voice.
-        row = (density: 0.35 + (size * 0.85) + (motion * 0.6),
+        row = (density: 0.2 + (size * 0.35) + (motion * 0.55),
             position: if(track.isNil) { scene.linlin(0, 1, 0.15, 0.85) } { track[1] },
-            spread: 0.015 + (motion * 0.06),
-            durLo: 0.45 + (size * 0.45), durHi: 1 + (size * 0.8),
+            spread: 0.01 + (motion * 0.035),
+            durLo: 0.8 + (size * 0.3), durHi: 1.4 + (size * 0.4),
             rateLo: rate * 0.97, rateHi: rate * 1.03,
-            cutoff: y.linexp(0, 1, 800, 3500),
-            width: if(b.isNil) { 0.6 } { b[3].linlin(0, 1, 0.2, 0.85) });
+            cutoff: y.linexp(0, 1, 750, 2000),
+            width: if(b.isNil) { 0.5 } { b[3].linlin(0, 1, 0.2, 0.65) });
     } {
-        if(e.notNil) {
-            row[\panBase] = e[1]; row[\panStep] = e[2];
-            row[\rateBase] = e[3]; row[\rateStep] = e[4];
-        };
+        var track = e ? a;
+        var y = if(track.isNil) { 0.4 } { track[2] };
+        var shade = y.squared * (3 - (2 * y));
+        row = (rateBase: 0.18 + (shade * 0.14), rateStep: 0.008,
+            panBase: 0.012, panStep: 0.003, pitchRatio: 1,
+            cutoff: shade.linexp(0, 1, 700, 1800));
     };
-    if((kind == \groove) and: { a.notNil }) { row[\pitchRatio] = a[5].linexp(0, 1, 0.5, 2) };
     // Effect parameters go to separate nodes, not the source SynthDef.
     [\delay, \decay, \wet, \damp].do { |key| row.removeAt(key) };
     row[\amp] = state[\levels][kind];
@@ -172,14 +173,11 @@ state[\updateLayer] = { |kind|
         if(layer[\node].notNil) { layer[\node].set(*state[\controls].value(kind)) };
         if(layer[\fx].notNil) {
             layer[\fx].set(\delay, layer[\scene][\delay], \decay, layer[\scene][\decay],
-                \wet, if(state[\dry].includes(kind)) { 0 } { if(kind == \granular) { 0.3 } { layer[\scene][\wet] } },
-                \diffuse, (kind == \granular).binaryValue,
+                \wet, if(state[\dry].includes(kind)) { 0 } { if(kind == \granular) { 0.4 } { 0.45 } },
+                \diffuse, 1,
                 \damp, if(c.isNil) { layer[\scene][\damp] } { c[2] },
                 \feedback, if(b.isNil) { 0.35 } { b[2].clip(0, 0.85) },
                 \width, if(b.isNil) { 0.6 } { b[3] });
-            if((kind == \groove) and: { a.notNil }) {
-                layer[\fx].set(\delay, a[2].linlin(0, 1, 0.005, 1.5), \feedback, a[4] * 0.8);
-            };
         };
     };
 };
@@ -216,13 +214,44 @@ state[\selectSample] = { |kind, index|
                         layer[\node] = Synth.head(state[\sources], name, args);
                         if(oldNode.notNil) { oldNode.set(\gate, 0) };
                         if(oldBuffer.notNil) {
-                            // Granular release is 2.5 s; retain its sample until the node ends.
-                            SystemClock.sched(if(kind == \granular) { 3.0 } { 1.0 }, { oldBuffer.free; nil });
+                            // Both sample voices release over 5 s; retain their buffers.
+                            SystemClock.sched(6.0, { oldBuffer.free; nil });
                         };
                     } {
                         buffer.free;
                     };
                 });
+            };
+        };
+    };
+};
+
+// A region must settle before changing a sample. Never queue intermediate scenes.
+state[\requestSample] = { |kind, index|
+    var layer = state[\layers][kind];
+    if(layer[\requested].isNil) {
+        layer[\sampleChangedAt] = Main.elapsedTime;
+        state[\selectSample].value(kind, index);
+    } {
+        if(index != layer[\pendingSample]) {
+            var version = (layer[\sampleRequestVersion] ? 0) + 1;
+            layer[\sampleRequestVersion] = version;
+            layer[\pendingSample] = index;
+            if(index != layer[\requested]) {
+                layer[\sampleStatus] = "Cambio pendiente (transicion lenta)";
+                SystemClock.sched((state[\config][\sampleSettleSeconds] ? 1.5).max(0.05), {
+                    var remaining = (state[\config][\sampleHoldSeconds] ? 12)
+                        - (Main.elapsedTime - (layer[\sampleChangedAt] ? 0));
+                    if(state[\running] == true and: { layer[\sampleRequestVersion] == version }) {
+                        if(remaining > 0) { remaining } {
+                            layer[\sampleChangedAt] = Main.elapsedTime;
+                            state[\selectSample].value(kind, index);
+                            nil
+                        }
+                    } { nil }
+                });
+            } {
+                if(layer[\loadedSample].notNil) { layer[\sampleStatus] = "Cargado" };
             };
         };
     };
@@ -235,7 +264,7 @@ state[\applyScene] = { |value|
         if(layer.notNil) {
             layer[\scene] = state[\interpolate].value(state[\data][kind], value);
             state[\updateLayer].value(kind);
-            state[\selectSample].value(kind, layer[\scene][\sample]);
+            state[\requestSample].value(kind, layer[\scene][\sample]);
         };
     };
 };
@@ -247,11 +276,12 @@ state[\spectralEvent] = { |value|
         and: { (value - previous).abs >= 0.04 } and: { (now - state[\lastEvent]) > 0.06 }) {
         state[\eventCount] = state[\eventCount] + 1;
         state[\lastEvent] = now;
-        if((value.floor != previous.floor) or: { state[\eventCount] % 25 == 0 }) {
+        if(((value.floor != previous.floor) or: { state[\eventCount] % 25 == 0 })
+            and: { (now - (state[\bankAppliedAt] ? 0)) >= (state[\config][\spectralHoldSeconds] ? 8) }) {
             state[\bank] = (state[\bank] + 1) % state[\activeBanks].size;
             state[\applyBank].value;
         };
-        state[\spectral].set(\motion, (value - previous).abs.linlin(0, 2, 0.1, 3).clip(0.1, 3));
+        state[\spectral].set(\motion, (value - previous).abs.linlin(0, 2, 0.008, 0.07).clip(0.008, 0.07));
     };
     state[\lastState] = value;
 };

@@ -66,7 +66,7 @@ if(PathName(state[\audioFolder]).isFolder.not) {
             };
             state[\spectralBus] = Bus.audio(server, 2);
             state[\spectralFx] = Synth.head(state[\effects], \imolEffects,
-                [\in, state[\spectralBus].index, \out, state[\voiceBuses][\spectral].index, \wet, 0.35]);
+                [\in, state[\spectralBus].index, \out, state[\voiceBuses][\spectral].index, \wet, 0.45, \diffuse, 1]);
             state[\spectral] = Synth.head(state[\sources], \imolSpectral,
                 [\out, state[\spectralBus].index, \amp, state[\levels][\spectral]]);
             state[\applyBank].value; // Silent until the score announces its loaded audio.

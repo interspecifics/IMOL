@@ -24,7 +24,7 @@ try {
     check.value(Dictionary.newFrom(~imol[\controls].value(\granular))[\position] == 0.4, "Tracker E priority lost");
     effects = server.makeBundle(false, { ~imol[\updateLayer].value(\granular) });
     check.value(effects[0][effects[0].indexOf(\diffuse) + 1] == 1, "Granular still uses rhythmic delay");
-    check.value(effects[0][effects[0].indexOf(\wet) + 1] == 0.3, "Wrong ambient reverb mix");
+    check.value(effects[0][effects[0].indexOf(\wet) + 1] == 0.4, "Wrong ambient reverb mix");
     ~imol[\setDry].value(\granular, true);
     effects = server.makeBundle(false, { ~imol[\updateLayer].value(\granular) });
     check.value(effects[0][effects[0].indexOf(\wet) + 1] == 0, "Updates overwrite dry listening mode");
