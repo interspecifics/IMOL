@@ -19,6 +19,16 @@ state[\solo] = nil;
 state[\dry] = IdentitySet.new;
 state[\channelNodes] = IdentityDictionary.new;
 state[\spectralStatus] = "Esperando audio del score";
+state[\masterLevel] = (state[\config][\master] ? 0.3).clip(0, 1);
+state[\outputGainDb] = (state[\config][\outputGainDb] ? 0).clip(0, 30);
+state[\setMaster] = { |level|
+    state[\masterLevel] = level.clip(0, 1);
+    if(state[\master].notNil) { state[\master].set(\amp, state[\masterLevel]) };
+};
+state[\setOutputGain] = { |db|
+    state[\outputGainDb] = db.clip(0, 30);
+    if(state[\master].notNil) { state[\master].set(\gainDb, state[\outputGainDb]) };
+};
 
 state[\updateMix] = {
     state[\channelNames].do { |kind|
@@ -297,7 +307,7 @@ state[\acceptOSC] = { |msg|
     var string = { |x| x.isString or: { x.isKindOf(Symbol) } };
     case
     { path == "/score/audio" } { (msg.size == 2) and: { string.value(msg[1]) } }
-    { ["/system/state", "/system/stateB", "/imol/master"].includesEqual(path) } { numeric.value(1) }
+    { ["/system/state", "/system/stateB", "/imol/master", "/imol/outputGainDb"].includesEqual(path) } { numeric.value(1) }
     { path == "/reflection/1" } { numeric.value(5) }
     { ["/track/A", "/track/B", "/track/C", "/track/E"].includesEqual(path) } { numeric.value(8) }
     { path == "/imol/layer" } {
@@ -353,7 +363,10 @@ state[\installOSC] = {
         });
     };
     register.value(\imolMasterControl, '/imol/master', { |msg|
-        if(valid.value(msg, 1)) { state[\master].set(\amp, msg[1].clip(0, 1)) };
+        state[\setMaster].value(msg[1]);
+    });
+    register.value(\imolOutputGainControl, '/imol/outputGainDb', { |msg|
+        state[\setOutputGain].value(msg[1]);
     });
     register.value(\imolLayerControl, '/imol/layer', { |msg|
         if((msg.size == 3) and: { msg[1].isString or: { msg[1].isKindOf(Symbol) } } and: { msg[2].isNumber }) {

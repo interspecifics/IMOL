@@ -7,6 +7,7 @@
     outputChannels: 2,
     outputBus: 0,
     master: 0.30,
+    outputGainDb: 24, // Compensate the quiet ambient mix before the output limiter (0..30 dB).
     spectralLevel: 0.10,
     granularLevel: 0.14,
     grooveLevel: 0.10,

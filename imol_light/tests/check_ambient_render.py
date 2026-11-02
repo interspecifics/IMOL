@@ -23,6 +23,10 @@ for i, name in enumerate(("mix", "spectral", "granular", "groove", "reflection")
     stats[name] = dict(rms=rms, peak=peak, high_frequency_fraction=high_fraction)
     print(f"PASS {name}: RMS={rms:.6f}, peak={peak:.6f}, energy above 3 kHz={high_fraction:.3%}")
 
+# This fixture previously passed at -59.5 dBFS RMS despite being nearly inaudible.
+mix_db = 20 * np.log10(stats["mix"]["rms"])
+assert -40 < mix_db < -25, ("Ambient output calibration", mix_db)
+
 # The reverb is meant to continue during retuning. Check the dry source only.
 spectral = audio[:, 10:12]
 for change in (20, 40, 60):

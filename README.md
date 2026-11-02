@@ -91,6 +91,20 @@ controlan las capas. **Play** recorre el análisis visual; el sonido puede segui
 activo mientras el score está en pausa. En el monitor, usar **Solo** para
 escuchar una voz y **SECO** para comparar sin efectos.
 
+En **Salida general**, **Nivel** controla el volumen de 0 a 1 (0 silencia todo)
+y **dB salida** compensa el nivel de la mezcla ambient, de 0 a +30 dB. El valor
+inicial es **0.30 / +24 dB**, con limitador después de la ganancia. La compensación
+mantiene las pausas y texturas; no aumenta la densidad de las voces. El medidor
+de Salida general mide después de estos controles y del limitador; los medidores
+de cada voz se mantienen antes del volumen general. Los valores numéricos L/R
+son picos en dBFS y las barras muestran RMS.
+
+Los cambios del monitor son temporales. Para conservarlos al reiniciar, editar
+`master` y `outputGainDb` en `imol_light/sound/supercollider/config.scd`.
+También se pueden ajustar durante la ejecución con OSC `/imol/master` (0..1)
+y `/imol/outputGainDb` (0..30). Tras actualizar esta versión hay que cerrar y
+volver a iniciar IMOL para cargar la nueva etapa de salida.
+
 Cerrar el score o pulsar **Ctrl+C** en el terminal detiene la sesión. Para usar
 el IDE de SuperCollider, abrir `sound/supercollider/main.scd` y ejecutar el
 archivo completo. Detener con `~imolStop.value;`, esperar un segundo y volver

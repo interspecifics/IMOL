@@ -28,6 +28,18 @@ Routine({
         check.value(~imol[\oscRows]["/feat/test"][\status] == "ignorado", "Ignored stream not labelled");
         check.value(~imol[\spectralStatus] == "Parciales cargados", "Spectral selection status missing");
         check.value(~imol[\partialPath].endsWith("a-protest-in-bogota-colombia.scd"), "Wrong partial path");
+        ~imol[\master] = Synth.basicNew(\imolMaster, server, 500);
+        commands = server.makeBundle(false, { ~imol[\setMaster].value(0); ~imol[\setOutputGain].value(99) });
+        check.value(commands[0].last == 0, "Master mute not sent");
+        check.value(commands[1].last == 30, "Output gain not bounded");
+        target.sendMsg('/imol/master', 0.3);
+        target.sendMsg('/imol/outputGainDb', 24);
+        0.1.wait;
+        check.value((~imol[\masterLevel] - 0.3).abs < 0.0001, "Master OSC not reflected in monitor");
+        check.value(~imol[\outputGainDb] == 24, "Gain OSC not reflected in monitor");
+        target.sendMsg('/imol/outputGainDb', "invalid");
+        0.1.wait;
+        check.value(~imol[\outputGainDb] == 24, "Invalid gain changed output");
         ~imol[\solo] = \granular;
         commands = server.makeBundle(false, { ~imol[\updateMix].value });
         check.value(commands.collect { |c| c.last } == [0, 1, 0, 0], "Solo does not isolate granular");

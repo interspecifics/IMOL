@@ -98,10 +98,12 @@
         var mixed = (dry * (1 - mix)) + (LPF.ar(space, 2200) * mix);
         Out.ar(out, LeakDC.ar(mixed));
     }),
-    SynthDef(\imolMaster, { |in=0, out=0, amp=0.5, gate=1|
+    SynthDef(\imolMaster, { |in=0, out=0, amp=0.5, gate=1, gainDb=0|
         var sig = In.ar(in, 2);
+        // Fixed makeup gain preserves the voices' dynamics and pauses.
+        var gain = Lag.kr(gainDb.clip(0, 30), 2).dbamp;
         var env = EnvGen.kr(Env.asr(0.1, 1, 0.5), gate, doneAction: 2);
-        Out.ar(out, Limiter.ar(LeakDC.ar(sig) * Lag.kr(amp.clip(0, 1), 0.2), 0.85) * env);
+        Out.ar(out, Limiter.ar(LeakDC.ar(sig) * Lag.kr(amp.clip(0, 1), 0.2) * gain, 0.85) * env);
     })
 ];
 )

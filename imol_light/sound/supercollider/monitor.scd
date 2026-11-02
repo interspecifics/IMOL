@@ -61,6 +61,7 @@ state[\openMonitor] = {
         } {
             var window = Window("IMOL Light — Monitor audio", Rect(60, 60, 1040, 775), resizable: false);
             var heading, spectral, partial, granular, samples, table, meterViews, levelBoxes, soloButtons, muteButtons, dryButtons;
+            var masterBox, gainBox;
             var labels = ["Espectral", "Granular", "Multicanal", "Reflection", "Salida general"];
             // Match the Python score's palette and compact, monospaced controls.
             var background = Color.gray(20/255), panel = Color.gray(26/255);
@@ -134,7 +135,20 @@ state[\openMonitor] = {
                             .action_({ |view| state[\setDry].value(kind, view.value == 1) });
                     };
                 } {
-                    button.value(Rect(715, y, 301, 28), [["Quitar Solo / Mute", foreground, buttonColor]]).action_({
+                    masterBox = NumberBox(window, Rect(635, y, 70, 28)).decimals_(2)
+                        .font_(Font("Menlo", 12)).background_(buttonColor).normalColor_(accent)
+                        .typingColor_(Color.white).stringColor_(accent)
+                        .clipLo_(0).clipHi_(1).value_(state[\masterLevel])
+                        .toolTip_("Volumen general: 0 = silencio, 1 = maximo")
+                        .action_({ |view| state[\setMaster].value(view.value) });
+                    gainBox = NumberBox(window, Rect(715, y, 65, 28)).decimals_(1)
+                        .font_(Font("Menlo", 12)).background_(buttonColor).normalColor_(accent)
+                        .typingColor_(Color.white).stringColor_(accent)
+                        .clipLo_(0).clipHi_(30).value_(state[\outputGainDb])
+                        .toolTip_("Ganancia de salida antes del limitador (0 a +30 dB); no cambia las texturas")
+                        .action_({ |view| state[\setOutputGain].value(view.value) });
+                    text.value(Rect(785, y, 65, 28), "dB salida", 10);
+                    button.value(Rect(855, y, 161, 28), [["Quitar Solo / Mute", foreground, buttonColor]]).action_({
                         state[\solo] = nil; state[\muted].clear; state[\updateMix].value;
                     });
                 };
@@ -182,6 +196,8 @@ state[\openMonitor] = {
                         if(dryButtons[i].notNil) { dryButtons[i].value = state[\dry].includes(kind).binaryValue };
                     };
                 };
+                if(masterBox.hasFocus.not) { masterBox.value = state[\masterLevel] };
+                if(gainBox.hasFocus.not) { gainBox.value = state[\outputGainDb] };
                 granular.string = state[\granularDescription].value;
                 samples.string = [\granular, \groove].collect { |kind|
                     var layer = state[\layers][kind];

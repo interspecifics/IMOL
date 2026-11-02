@@ -74,7 +74,8 @@ if(PathName(state[\audioFolder]).isFolder.not) {
                 [\out, state[\voiceBuses][\reflection].index, \amp, state[\levels][\reflection],
                     \timeout, config[\reflectionTimeout] ? 3.0]);
             state[\master] = Synth.head(state[\output], \imolMaster,
-                [\in, state[\mixBus].index, \out, config[\outputBus], \amp, config[\master]]);
+                [\in, state[\mixBus].index, \out, config[\outputBus],
+                    \amp, state[\masterLevel], \gainDb, state[\outputGainDb]]);
             state[\masterMeter] = Synth.tail(state[\output], \imolMeter, [\in, config[\outputBus], \meterID, 4]);
             state[\applyScene].value(1);
             state[\installOSC].value;

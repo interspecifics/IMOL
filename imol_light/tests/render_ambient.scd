@@ -10,7 +10,7 @@ var output = root +/+ if(baseline) { "runtime/ambient_before.wav" } { "runtime/a
 var options = ServerOptions.new.numOutputBusChannels_(12).numInputBusChannels_(0)
     .memSize_(131072).numWireBufs_(2048);
 if(baseline) {
-    config.putAll((master: 0.35, spectralLevel: 0.12, granularLevel: 0.2, grooveLevel: 0.15, reflectionLevel: 0.18));
+    config.putAll((master: 0.35, outputGainDb: 0, spectralLevel: 0.12, granularLevel: 0.2, grooveLevel: 0.15, reflectionLevel: 0.18));
 };
 ~imol = (config: config, data: data);
 (root +/+ if(baseline) { "runtime/ambient_before_controller.scd" } { "sound/supercollider/controller.scd" }).load;
@@ -35,9 +35,10 @@ list.add([0.1, [\g_new, 100, 0, 0], [\g_new, 200, 3, 100], [\g_new, 300, 3, 200]
         \diffuse, if(baseline) { (i == 1).binaryValue } { 1 }]]);
 };
 4.do { |i|
-    list.add([0.3, [\s_new, \ambientStem, 301+i, 0, 300, \in, 24+(2*i), \stem, 2+(2*i), \amp, config[\master]]]);
+    list.add([0.3, [\s_new, \ambientStem, 301+i, 0, 300, \in, 24+(2*i), \stem, 2+(2*i),
+        \amp, config[\master] * (config[\outputGainDb] ? 0).dbamp]]);
 };
-list.add([0.3, [\s_new, \imolMaster, 401, 0, 400, \in, 32, \amp, config[\master]]]);
+list.add([0.3, [\s_new, \imolMaster, 401, 0, 400, \in, 32, \amp, config[\master], \gainDb, config[\outputGainDb] ? 0]]);
 list.add([0.3, [\s_new, \ambientSpectralDry, 305, 0, 300]]);
 list.add([0.5, [\s_new, \imolSpectral, 101, 0, 100, \out, 16, \amp, config[\spectralLevel]],
     [\n_setn, 101, \freqs, 83] ++ data[\banks][0][\freqs] ++ [\weights, 83] ++ data[\banks][0][\amps],
