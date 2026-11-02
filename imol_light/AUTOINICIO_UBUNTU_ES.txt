@@ -90,6 +90,24 @@ La configuración se guarda en ~/.config/autostart/imol-light.desktop (o bajo
 XDG_CONFIG_HOME si está definido). Repetir la instalación después de mover la
 carpeta del proyecto. El script calcula las rutas desde su propia ubicación.
 
+6. SI EL MONITOR APARECE Y DESPUÉS SE CIERRA SIN MOSTRAR EL SCORE
+
+Consultar ambos registros antes de repetir el inicio. Si aparece “could not
+connect to display 0”, actualizar la rama imol-light: se corrigió un conflicto
+entre --display (índice de monitor en IMOL) y la opción del mismo nombre de Qt
+(dirección del servidor gráfico). El score ahora pasa a Qt solo el nombre del
+programa, conserva DISPLAY/XAUTHORITY de la sesión y descarta las rutas de
+plugins y fuentes inyectadas por OpenCV para usar las de PySide6.
+
+Los fallos del score se indican con ERROR y un código de salida distinto de cero.
+El registro también muestra el entorno gráfico y la pantalla elegida. No cambiar
+DISPLAY a “0” ni adivinar su dirección: se hereda del escritorio que inicia IMOL.
+Desde SSH se puede actualizar y leer registros; para probar la ventana, ejecutar
+--run en una terminal del escritorio, o cerrar y abrir la sesión gráfica para
+activar el inicio automático. No es necesario reinstalar el inicio automático
+después de una actualización si la carpeta no cambió.
+
 REFERENCIAS
 https://specifications.freedesktop.org/autostart/latest/
 https://doc.qt.io/qt-6/qt.html#WindowType-enum
+https://doc.qt.io/qt-6/qguiapplication.html#supported-command-line-options

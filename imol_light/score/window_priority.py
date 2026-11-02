@@ -1,9 +1,34 @@
 """Keep the exhibition score above ordinary desktop windows."""
 import os
+from pathlib import Path
 import sys
 
 from PySide6.QtCore import QObject, QTimer, Qt
 from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtWidgets import QApplication
+
+
+def create_score_application(enabled):
+    import cv2
+    # OpenCV GUI wheels on Linux inject their own (Qt 5) plugin/font paths.
+    # The score uses PySide6; leave unrelated desktop settings intact.
+    opencv_qt = Path(cv2.__file__).resolve().parent / "qt"
+    for name in ("QT_QPA_PLATFORM_PLUGIN_PATH", "QT_QPA_FONTDIR"):
+        value = os.environ.get(name)
+        if value:
+            try:
+                Path(value).resolve().relative_to(opencv_qt)
+            except ValueError:
+                continue
+            del os.environ[name]
+            print(f"[DISPLAY] Ignorando {name} de OpenCV; se usará Qt de PySide6.", flush=True)
+    select_display_backend(enabled)
+    print(f"[DISPLAY] Sesión DISPLAY={os.environ.get('DISPLAY', '(sin definir)')} "
+          f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY', '(sin definir)')} "
+          f"Qt={os.environ.get('QT_QPA_PLATFORM', 'automático')}", flush=True)
+    # argparse already consumed IMOL's options. Qt also recognizes --display,
+    # but expects an X server address there, not our numeric monitor index.
+    return QApplication([sys.argv[0]])
 
 
 def select_display_backend(enabled):

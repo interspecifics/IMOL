@@ -55,6 +55,7 @@ def main():
     sound = None
     sound_ready = False
     handles = []
+    exit_status = 0
     def interrupted(*_):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
@@ -91,6 +92,13 @@ def main():
         print("IMOL Light running. Ctrl-C stops this run.", flush=True)
         while all(p.poll() is None for p in processes):
             time.sleep(.3)
+        # Capture failures before cleanup terminates the remaining processes.
+        for process in processes:
+            code = process.poll()
+            if code is not None and code != 0:
+                name = "SuperCollider" if process is sound else "Score"
+                print(f"ERROR: {name} terminó con código {code}.", file=sys.stderr, flush=True)
+                exit_status = min(255, code if code > 0 else 128 - code)
     except KeyboardInterrupt:
         print("Stopping IMOL Light…")
     finally:
@@ -111,7 +119,8 @@ def main():
                     process.wait()
         for handle in handles:
             handle.close()
+    return exit_status
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

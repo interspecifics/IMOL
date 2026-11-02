@@ -56,7 +56,7 @@ from PySide6.QtWidgets import (
 # Import our advanced geometry analyzer
 from light_geometry_analyzer import LightGeometryAnalyzer, GeometricFeatures
 from camera_roles import DEFAULT_ROLES_PATH, dhash_hex_from_bgr, probe_best_index_for_role, save_role
-from window_priority import ScorePriority, select_display_backend
+from window_priority import ScorePriority, create_score_application
 
 # V2: Import ML state analyzer and adaptive OSC controller
 from cv_state_analyzer import CvStateAnalyzer
@@ -4103,8 +4103,7 @@ def main():
         if not _cli_has("--score-spectro-mask-feather"):
             args.score_spectro_mask_feather = 9
     
-    select_display_backend(args.always_on_top)
-    app = QApplication(sys.argv)
+    app = create_score_application(args.always_on_top)
     # Global typography (single font everywhere).
     # Use only this font family to keep the interface consistent.
     app.setFont(QFont("Menlo", 12))
