@@ -57,6 +57,17 @@ seleccionar la interfaz y arrancarlo en QjackCtl antes de iniciar IMOL.
 Consultar la [guía Ubuntu](imol_light/INSTALACION_UBUNTU_ES.txt) para detalles.
 La instalación Ubuntu tiene pruebas simuladas; falta validarla en un equipo real.
 
+## Inicio automático en Ubuntu
+
+Desde `imol_light`, ejecutar sin sudo `bash install_autostart_ubuntu.sh`.
+Al entrar al escritorio arranca el sonido y el score con cámara, a pantalla
+completa y con prioridad sobre las ventanas normales. **F10** libera o restaura
+la prioridad para acceder al monitor. Para arrancar tras encender el equipo sin
+intervención, activar también el inicio de sesión automático en Ubuntu.
+Consultar la [guía de inicio automático](imol_light/AUTOINICIO_UBUNTU_ES.txt)
+para la instalación en `/home/i/code/IMOL-light`, selección de pantalla,
+registros, limitaciones de Wayland y desactivación.
+
 ## Audio incluido
 
 - `assets/archives/`: las grabaciones completas en MP3 y sus metadatos RTF,

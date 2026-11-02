@@ -56,6 +56,7 @@ from PySide6.QtWidgets import (
 # Import our advanced geometry analyzer
 from light_geometry_analyzer import LightGeometryAnalyzer, GeometricFeatures
 from camera_roles import DEFAULT_ROLES_PATH, dhash_hex_from_bgr, probe_best_index_for_role, save_role
+from window_priority import ScorePriority, select_display_backend
 
 # V2: Import ML state analyzer and adaptive OSC controller
 from cv_state_analyzer import CvStateAnalyzer
@@ -3847,6 +3848,10 @@ def parse_args(argv=None):
                        help="Height of top panels (default: 580)")
     parser.add_argument("--display", type=int, default=-1,
                        help="Display index to show window on (-1 = auto-detect largest, default: -1)")
+    parser.add_argument("--always-on-top", dest="always_on_top", action="store_true", default=True,
+                       help="Keep the score above ordinary windows (default; F10 toggles)")
+    parser.add_argument("--no-always-on-top", dest="always_on_top", action="store_false",
+                       help="Allow other windows above the score")
     parser.add_argument("--hide-cursor", action="store_true", default=True,
                        help="(Default: enabled) Hide mouse cursor in fullscreen mode")
     parser.add_argument("--show-cursor", dest="hide_cursor", action="store_false",
@@ -4098,6 +4103,7 @@ def main():
         if not _cli_has("--score-spectro-mask-feather"):
             args.score_spectro_mask_feather = 9
     
+    select_display_backend(args.always_on_top)
     app = QApplication(sys.argv)
     # Global typography (single font everywhere).
     # Use only this font family to keep the interface consistent.
@@ -4126,6 +4132,7 @@ def main():
         print(f"[DISPLAY] Using primary screen (fallback)")
     
     window = IMOLGraphicScoreWindow(args)
+    window.score_priority = ScorePriority(window, args.always_on_top)
     
     # Position window on target screen BEFORE going fullscreen
     if target_screen:
@@ -4147,6 +4154,7 @@ def main():
     
     # Now go fullscreen on the positioned screen
     window.showFullScreen()
+    window.score_priority.after_show()
     
     # Auto-load audio folder if specified
     if args.audio_folder:

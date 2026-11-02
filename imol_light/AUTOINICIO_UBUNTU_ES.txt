@@ -1,0 +1,95 @@
+IMOL LIGHT — INICIO AUTOMÁTICO EN UBUNTU
+
+Ruta de esta instalación: /home/i/code/IMOL-light/imol_light
+
+1. ACTUALIZAR E INSTALAR EL INICIO AUTOMÁTICO
+
+Abrir una terminal en el escritorio de la cuenta i. Ejecutar sin sudo:
+
+cd /home/i/code/IMOL-light
+git pull --ff-only origin imol-light
+cd imol_light
+bash install_autostart_ubuntu.sh
+
+Requiere haber completado bash install_ubuntu.sh. El instalador de inicio
+comprueba las dependencias y los WAV antes de guardar la configuración.
+Si falla esa comprobación, resolver el error y volver a ejecutar el comando.
+No instala paquetes ni abre una sesión de sonido durante la instalación.
+
+2. QUÉ SUCEDE AL INICIAR
+
+Al entrar al escritorio se inicia SuperCollider y después el score con cámara
+y las grabaciones de assets/archives. Espera hasta 90 segundos a que responda
+PipeWire o JACK y deja cinco segundos adicionales para estabilizar el escritorio.
+No necesita abrir una terminal. Mantiene el entorno virtual del proyecto.
+
+El score ocupa la pantalla 0 completa y solicita permanecer por encima de las
+ventanas normales, incluido el monitor de audio. F10 libera esa prioridad para
+acceder al monitor o a otra ventana; al volver al score, F10 la activa de nuevo.
+La prioridad vuelve a activarse en cada arranque. Alt+F4 cierra el score y la
+sesión de sonido. No se reinicia automáticamente al cerrarlo deliberadamente.
+
+Para usar otra pantalla, volver a instalar con su índice:
+bash install_autostart_ubuntu.sh --display 1
+
+Usar --display -1 para elegir la pantalla de mayor resolución. Si el índice no
+existe, el score usa la pantalla principal. Conectar el proyector antes de entrar
+al escritorio para que esté disponible al elegir la pantalla.
+
+En Linux, si DISPLAY está disponible, el score usa X11/XWayland para la prioridad
+de ventana, salvo que QT_QPA_PLATFORM ya esté definido. En Wayland nativo el
+compositor puede ignorar esa prioridad. Si ocurre, seleccionar “Ubuntu on Xorg”
+en la pantalla de acceso (cuando esté disponible) y volver a entrar. El bloqueo
+de pantalla, los diálogos del sistema y otras ventanas prioritarias dependen del
+escritorio; esto no es un modo kiosco que bloquee el acceso al equipo.
+
+3. ARRANCAR SIN INTRODUCIR CONTRASEÑA TRAS ENCENDER
+
+El inicio automático de aplicaciones se ejecuta al entrar al escritorio, no en
+la pantalla de contraseña. Para una instalación sin intervención, activar el
+inicio de sesión automático de la cuenta i en Configuración → Usuarios (en
+algunas versiones: Sistema → Usuarios), desbloquear y activar la opción.
+Revisar también Energía y Privacidad/Pantalla de bloqueo para que la suspensión,
+el apagado de pantalla o el bloqueo automático no interrumpan la exhibición.
+Estas preferencias se ajustan manualmente; los scripts no las modifican.
+
+Si se utiliza JACK, configurar previamente QjackCtl para iniciar su servidor
+con la sesión. El script espera al servidor existente y no decide la interfaz
+ni inicia un segundo servidor JACK. PipeWire normalmente inicia con el escritorio.
+
+4. PROBAR AHORA
+
+Cerrar primero cualquier sesión de IMOL abierta. Desde el escritorio:
+
+cd /home/i/code/IMOL-light/imol_light
+bash install_autostart_ubuntu.sh --run
+
+La terminal queda ocupada mientras corre. Ctrl+C detiene esta prueba y sus
+procesos. Para validar el arranque real, cerrar y abrir la sesión o reiniciar.
+Confirmar cámara, audio cargado, sonido y score delante de las demás ventanas.
+
+5. CONSULTAR Y DESACTIVAR
+
+Ver la configuración instalada:
+bash install_autostart_ubuntu.sh --status
+
+Ver los errores del inicio y del score:
+tail -n 100 /home/i/code/IMOL-light/imol_light/runtime/autostart.log
+
+Ver los errores de SuperCollider:
+tail -n 100 /home/i/code/IMOL-light/imol_light/runtime/supercollider.log
+
+El inicio anterior queda en runtime/autostart.previous.log. Una segunda ejecución
+automática no lanza otra sesión ni sobrescribe el registro activo. El lanzador
+también comprueba que los puertos de sonido estén libres.
+
+Desactivar futuros inicios, sin cerrar la sesión actual:
+bash install_autostart_ubuntu.sh --remove
+
+La configuración se guarda en ~/.config/autostart/imol-light.desktop (o bajo
+XDG_CONFIG_HOME si está definido). Repetir la instalación después de mover la
+carpeta del proyecto. El script calcula las rutas desde su propia ubicación.
+
+REFERENCIAS
+https://specifications.freedesktop.org/autostart/latest/
+https://doc.qt.io/qt-6/qt.html#WindowType-enum
